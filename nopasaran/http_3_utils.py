@@ -37,7 +37,7 @@ def create_ssl_context(is_client=True):
 
 def get_default_secrets_log_file():
     """Get the default path for SSL key logging file"""
-    return os.path.join(os.getcwd(), 'nopasaran_sslkeys.log')
+    return os.path.join(os.getcwd(), 'nopasaran_http3_sslkeys.log')
 
 def create_quic_configuration(is_client=True, verify_mode=None, secrets_log_file=None):
     """Create QUIC configuration for HTTP/3 with SSL key logging enabled by default for clients"""
@@ -63,7 +63,7 @@ def create_quic_configuration(is_client=True, verify_mode=None, secrets_log_file
         except Exception:
             # If we can't create/write to the log file, try a fallback location
             try:
-                fallback_file = os.path.join(os.path.expanduser("~"), 'nopasaran_sslkeys.log')
+                fallback_file = os.path.join(os.path.expanduser("~"), 'nopasaran_http3_sslkeys.log')
                 with open(fallback_file, 'a'):
                     pass
                 config.secrets_log_file = open(fallback_file, 'a')
