@@ -40,8 +40,8 @@ class HTTP3SocketClient(HTTP3SocketBase):
             self.connection.host = self.host
             self.connection.scheme = 'https'  # HTTP/3 always uses HTTPS
             
-            # Wait for connection to be established
-            await asyncio.sleep(0.1)
+            # Wait for connection to be established and give server time to start listening
+            await asyncio.sleep(1)
             
             selected_protocol = 'h3'  # HTTP/3 always uses h3
             return EventNames.CLIENT_STARTED.name, f"Client successfully connected to {self.host}:{self.port} with TLS and ALPN protocol {selected_protocol}."
