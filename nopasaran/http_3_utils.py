@@ -1,5 +1,6 @@
 import ssl
 import socket
+import os
 from typing import Dict, Any
 from aioquic.quic.configuration import QuicConfiguration
 from nopasaran.http_2_utils import generate_temp_certificates
@@ -34,8 +35,12 @@ def create_ssl_context(is_client=True):
     
     return context
 
-def create_quic_configuration(is_client=True, verify_mode=None):
-    """Create QUIC configuration for HTTP/3"""
+def get_default_secrets_log_file():
+    """Get the default path for SSL key logging file"""
+    return os.path.join(os.getcwd(), 'nopasaran_sslkeys.log')
+
+def create_quic_configuration(is_client=True, verify_mode=None, secrets_log_file=None):
+    """Create QUIC configuration for HTTP/3 with SSL key logging enabled by default for clients"""
     if verify_mode is None:
         verify_mode = ssl.CERT_NONE if is_client else ssl.CERT_REQUIRED
         
@@ -44,6 +49,27 @@ def create_quic_configuration(is_client=True, verify_mode=None):
         alpn_protocols=["h3"],
         verify_mode=verify_mode
     )
+    
+    # Enable SSL key logging only for clients
+    if is_client:
+        if secrets_log_file is None:
+            secrets_log_file = get_default_secrets_log_file()
+            
+        try:
+            # Ensure the log file can be created/opened
+            with open(secrets_log_file, 'a'):
+                pass
+            config.secrets_log_file = open(secrets_log_file, 'a')
+        except Exception:
+            # If we can't create/write to the log file, try a fallback location
+            try:
+                fallback_file = os.path.join(os.path.expanduser("~"), 'nopasaran_sslkeys.log')
+                with open(fallback_file, 'a'):
+                    pass
+                config.secrets_log_file = open(fallback_file, 'a')
+            except Exception:
+                # If all fails, proceed without logging but don't crash
+                pass
     
     # Configure certificates for server
     if not is_client:
@@ -57,6 +83,7 @@ def create_quic_configuration(is_client=True, verify_mode=None):
         os.unlink(temp_key)
     
     return config
+
 
 def create_socket(host: str, port: int, is_server=False):
     """Create socket for HTTP/3 connections"""

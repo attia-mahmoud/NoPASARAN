@@ -19,7 +19,7 @@ class HTTP3SocketClient(HTTP3SocketBase):
     async def start(self):
         """Start the HTTP/3 client"""
         try:
-            # Create QUIC configuration (TLS always enabled for HTTP/3)
+            # Create QUIC configuration (TLS always enabled for HTTP/3, SSL key logging always enabled for client)
             configuration = create_quic_configuration(
                 is_client=True,
                 verify_mode=False
