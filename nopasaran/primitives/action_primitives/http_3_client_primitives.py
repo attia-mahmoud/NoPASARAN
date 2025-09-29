@@ -1,3 +1,4 @@
+import asyncio
 from nopasaran.decorators import parsing_decorator
 from nopasaran.tools.http_3_socket_client import HTTP3SocketClient
 
@@ -68,7 +69,7 @@ class HTTP3ClientPrimitives:
             - EventNames.CLIENT_STARTED
         """
         client = state_machine.get_variable_value(inputs[0])
-        event, msg = client.start()
+        event, msg = asyncio.run(client.start())
         state_machine.set_variable_value(outputs[0], event)
         state_machine.set_variable_value(outputs[1], msg)
 
@@ -110,7 +111,7 @@ class HTTP3ClientPrimitives:
         """
         client = state_machine.get_variable_value(inputs[0])
         client_frames = state_machine.get_variable_value(inputs[1])
-        event, frames_sent, msg = client.send_frames(client_frames)
+        event, frames_sent, msg = asyncio.run(client.send_frames(client_frames))
         state_machine.set_variable_value(outputs[0], event)
         state_machine.set_variable_value(outputs[1], frames_sent)
         state_machine.set_variable_value(outputs[2], msg)
@@ -128,6 +129,6 @@ class HTTP3ClientPrimitives:
             - The event name
         """
         client = state_machine.get_variable_value(inputs[0])
-        event = client.close()
+        event = asyncio.run(client.close())
         state_machine.set_variable_value(outputs[0], event)
         state_machine.trigger_event(event)
