@@ -32,14 +32,15 @@ class HTTP3SocketBase:
             while time.time() - start_time < timeout:
                 if self.protocol and self.connection:
                     # Process QUIC events and convert to H3 events
-                    quic_events = self.protocol._quic.next_event()
-                    if quic_events:
-                        h3_events = []
-                        for quic_event in quic_events:
-                            events = self.connection.handle_event(quic_event)
-                            h3_events.extend(events)
-                        if h3_events:
-                            return h3_events
+                    h3_events = []
+                    while True:
+                        quic_event = self.protocol._quic.next_event()
+                        if quic_event is None:
+                            break
+                        events = self.connection.handle_event(quic_event)
+                        h3_events.extend(events)
+                    if h3_events:
+                        return h3_events
                 await asyncio.sleep(0.01)
             return None
         except Exception as e:
@@ -58,14 +59,18 @@ class HTTP3SocketBase:
             while time.time() - start_time < timeout:
                 if self.protocol:
                     # Get QUIC events directly without H3 processing
-                    event = self.protocol._quic.next_event()
-                    if event:
+                    while True:
+                        event = self.protocol._quic.next_event()
+                        if event is None:
+                            break
                         quic_events.append(event)
                         # Check for connection/stream termination events
                         if isinstance(event, (ConnectionTerminated, StreamReset)):
                             return quic_events
-                    else:
+                    
+                    if quic_events:
                         break
+                        
                 await asyncio.sleep(0.01)
             
             return quic_events if quic_events else None
@@ -73,11 +78,11 @@ class HTTP3SocketBase:
             logger.error(f"Error receiving QUIC events: {e}")
             return None
 
-    def set_headers_frames(self, frame_spec: Dict[str, Any]):
+    def set_deterministic_frames(self, frame_spec: Dict[str, Any]):
         """Set the deterministic frames to inject during communication"""
         self.deterministic_frames = frame_spec
 
-    async def send_headers_frames(self, frame_type: str = "client_frames"):
+    async def send_deterministic_frames(self, frame_type: str = "client_frames"):
         """Send deterministic frames based on the frame specification"""
         if not self.deterministic_frames or frame_type not in self.deterministic_frames:
             return EventNames.ERROR.name, [], "No deterministic frames configured"

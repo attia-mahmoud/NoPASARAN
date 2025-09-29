@@ -111,7 +111,10 @@ class HTTP3ClientPrimitives:
         """
         client = state_machine.get_variable_value(inputs[0])
         client_frames = state_machine.get_variable_value(inputs[1])
-        event, frames_sent, msg = asyncio.run(client.send_frames(client_frames))
+        # Set up frame specification for deterministic frame sending
+        frame_spec = {"client_frames": client_frames}
+        client.set_deterministic_frames(frame_spec)
+        event, frames_sent, msg = asyncio.run(client.send_deterministic_frames("client_frames"))
         state_machine.set_variable_value(outputs[0], event)
         state_machine.set_variable_value(outputs[1], frames_sent)
         state_machine.set_variable_value(outputs[2], msg)

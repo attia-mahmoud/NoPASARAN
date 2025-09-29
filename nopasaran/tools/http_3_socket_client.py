@@ -40,8 +40,22 @@ class HTTP3SocketClient(HTTP3SocketBase):
             self.connection.host = self.host
             self.connection.scheme = 'https'  # HTTP/3 always uses HTTPS
             
-            # Wait for connection to be established and give server time to start listening
-            await asyncio.sleep(1)
+            # Wait for connection to be established and verify it's ready
+            await asyncio.sleep(0.5)
+            
+            # Verify connection is established
+            if not self.protocol or not self.protocol._quic:
+                return EventNames.ERROR.name, f"Failed to establish QUIC connection to {self.host}:{self.port}"
+                
+            # Wait a bit more for handshake completion
+            max_wait = 5.0
+            wait_time = 0.0
+            while wait_time < max_wait and not self.protocol._quic._handshake_complete:
+                await asyncio.sleep(0.1)
+                wait_time += 0.1
+                
+            if not self.protocol._quic._handshake_complete:
+                return EventNames.ERROR.name, f"QUIC handshake did not complete within {max_wait}s"
             
             selected_protocol = 'h3'  # HTTP/3 always uses h3
             return EventNames.CLIENT_STARTED.name, f"Client successfully connected to {self.host}:{self.port} with TLS and ALPN protocol {selected_protocol}."
@@ -65,7 +79,7 @@ class HTTP3SocketClient(HTTP3SocketBase):
         
         try:
             # Send deterministic client frames if configured
-            if self.deterministic_frames and "client_frames" in self.deterministic_frames:
+            if hasattr(self, 'deterministic_frames') and self.deterministic_frames and "client_frames" in self.deterministic_frames:
                 result = await self.send_deterministic_frames("client_frames")
                 logger.info(f"Sent deterministic client frames: {result}")
             else:
@@ -75,28 +89,38 @@ class HTTP3SocketClient(HTTP3SocketBase):
             # Listen for server responses
             await self._listen_for_responses()
             
+            return EventNames.FRAMES_SENT.name, "Client communication completed successfully"
+            
         except Exception as e:
             logger.error(f"Error in client communication: {e}")
             return EventNames.ERROR.name, f"Client communication error: {str(e)}"
 
     async def _send_normal_request(self):
         """Send a normal HTTP/3 request"""
-        # Get next available stream
-        stream_id = self.protocol._quic.get_next_available_stream_id()
-        
-        # Send headers for a normal GET request
-        headers = [
-            (b':method', b'GET'),
-            (b':path', b'/'),
-            (b':scheme', self.connection.scheme.encode()),
-            (b':authority', self.host.encode()),
-            (b'user-agent', b'nopasaran-http3-client'),
-        ]
-        
-        self.connection.send_headers(stream_id, headers, end_stream=True)
-        self.protocol.transmit()
-        
-        logger.info(f"Sent normal HTTP/3 request on stream {stream_id}")
+        try:
+            # Verify connection is ready
+            if not self.protocol or not self.connection:
+                raise Exception("Connection not established")
+                
+            # Get next available stream
+            stream_id = self.protocol._quic.get_next_available_stream_id()
+            
+            # Send headers for a normal GET request
+            headers = [
+                (b':method', b'GET'),
+                (b':path', b'/'),
+                (b':scheme', self.connection.scheme.encode()),
+                (b':authority', self.host.encode()),
+                (b'user-agent', b'nopasaran-http3-client'),
+            ]
+            
+            self.connection.send_headers(stream_id, headers, end_stream=True)
+            self.protocol.transmit()
+            
+            logger.info(f"Sent normal HTTP/3 request on stream {stream_id}")
+        except Exception as e:
+            logger.error(f"Failed to send normal request: {e}")
+            raise
 
     async def _listen_for_responses(self):
         """Listen for responses from the server"""
