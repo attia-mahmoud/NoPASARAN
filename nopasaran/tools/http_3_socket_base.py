@@ -155,6 +155,10 @@ class HTTP3SocketBase:
                             if name_str == ':status':
                                 status_code = value_str
                         
+                        # Ignore 502 Bad Gateway errors (expected when server doesn't respond)
+                        if status_code == '502':
+                            continue
+                        
                         responses_found.append({
                             'stream_id': getattr(h3_event, 'stream_id', 'unknown'),
                             'headers': headers_dict,
