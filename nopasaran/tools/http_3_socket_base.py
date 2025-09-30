@@ -6,6 +6,7 @@ from aioquic.asyncio import QuicConnectionProtocol
 from aioquic.h3.connection import H3Connection
 from aioquic.h3.events import H3Event, HeadersReceived, DataReceived
 from aioquic.quic.events import QuicEvent, ConnectionTerminated, StreamReset
+from aioquic.quic.connection import QuicConnectionState
 from nopasaran.definitions.events import EventNames
 import nopasaran.tools.http_3_overwrite
 
@@ -94,6 +95,19 @@ class HTTP3SocketBase:
         """Send frames and handle responses"""
         if not self.connection or not self.protocol:
             return EventNames.ERROR.name, [], "Connection not established"
+        
+        # Ensure QUIC connection is in CONNECTED state before attempting to send
+        try:
+            current_state = getattr(self.protocol._quic, "_state", None)
+            if current_state != QuicConnectionState.CONNECTED:
+                return (
+                    EventNames.ERROR.name,
+                    [],
+                    f"Connection is not active (state={getattr(current_state, 'name', current_state)})."
+                )
+        except Exception:
+            # If we cannot determine state, proceed cautiously
+            pass
             
         sent_frames = []
         
@@ -103,10 +117,15 @@ class HTTP3SocketBase:
                 stream_id = self.protocol._quic.get_next_available_stream_id()
                 
                 if frame.get("type") == "HEADERS":
-                    headers = self._convert_headers(frame.get("headers", {}))
+                    headers_dict = frame.get("headers", {})
+                    # Normalize scheme for HTTP/3 (always HTTPS over QUIC)
+                    if ":scheme" in headers_dict and headers_dict.get(":scheme") == "http":
+                        headers_dict[":scheme"] = "https"
+                    headers = self._convert_headers(headers_dict)
                     end_stream = frame.get("end_stream", True)
                     
                     self.connection.send_headers(stream_id, headers, end_stream=end_stream)
+                    logger.debug(f"Sent HEADERS on stream {stream_id}: {headers}")
                     sent_frames.append(frame)
                 
                 # Transmit the data
