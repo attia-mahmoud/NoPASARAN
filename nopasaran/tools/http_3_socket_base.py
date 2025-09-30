@@ -275,15 +275,28 @@ class HTTP3SocketBase:
                 # Transmit the data
                 self.protocol.transmit()
                 
-                # Check IMMEDIATELY for fast responses (like 400 errors that arrive in ~20ms)
-                # The response may arrive before we even yield control
-                response_result = await self._check_for_any_response()
-                if response_result:
-                    event_name, message, responses = response_result
-                    detailed_msg = f"{message}. Responses: {responses}"
-                    return event_name, sent_frames, detailed_msg
+                # CRITICAL: Give the event loop multiple chances to poll the socket
+                # and read incoming datagrams BEFORE checking for events
+                # The 400 response arrives in ~20ms but the event loop needs time to:
+                # 1. Poll the socket selector
+                # 2. Read the UDP datagram  
+                # 3. Process it through QuicConnection.receive_datagram()
+                # 4. Generate QuicEvents and add them to the queue
                 
-                # Poll for slower responses over a 2 second period
+                # Yield control multiple times with short delays to let I/O happen
+                # Check for responses after every few yields
+                for i in range(50):  # 50 * 0.001 = 50ms total
+                    await asyncio.sleep(0.001)  # 1ms delay to trigger I/O polling
+                    
+                    # Check every 10ms
+                    if i % 10 == 9:
+                        response_result = await self._check_for_any_response()
+                        if response_result:
+                            event_name, message, responses = response_result
+                            detailed_msg = f"{message}. Responses: {responses}"
+                            return event_name, sent_frames, detailed_msg
+                
+                # Continue polling for slower responses
                 for check_attempt in range(20):  # Check 20 times over 2 seconds
                     await asyncio.sleep(0.1)  # 100ms between checks
                     
