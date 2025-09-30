@@ -24,6 +24,10 @@ class HTTP3SocketBase:
         # Persistent event loop for the connection lifecycle
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread = None
+        
+        # Event capture buffer - store all H3 events as they're generated
+        self._captured_events: List[Any] = []
+        self._event_capture_enabled = False
 
     def _ensure_loop(self):
         """Ensure we have a dedicated event loop running in a background thread."""
@@ -73,11 +77,24 @@ class HTTP3SocketBase:
                 print("[DEBUG] No protocol or connection")
                 return None
             
-            # Debug: Check connection state
+            # Debug: Check connection state and internal queues
             quic_state = getattr(self.protocol._quic, "_state", None)
             print(f"[DEBUG] QUIC connection state: {quic_state}")
             print(f"[DEBUG] Event loop: {asyncio.get_event_loop()}")
             print(f"[DEBUG] Transport: {getattr(self.protocol, '_transport', 'None')}")
+            
+            # Check QUIC internal state
+            quic_conn = self.protocol._quic
+            print(f"[DEBUG] QUIC _events queue length: {len(getattr(quic_conn, '_events', []))}")
+            print(f"[DEBUG] QUIC _streams: {list(getattr(quic_conn, '_streams', {}).keys())}")
+            
+            # Check if stream 0 still exists
+            streams = getattr(quic_conn, '_streams', {})
+            if 0 in streams:
+                stream_0 = streams[0]
+                print(f"[DEBUG] Stream 0 exists! State: {getattr(stream_0, 'receiver', 'no receiver')}")
+            else:
+                print(f"[DEBUG] Stream 0 NOT in _streams (already discarded)")
             
             responses_found = []
             event_count = 0
