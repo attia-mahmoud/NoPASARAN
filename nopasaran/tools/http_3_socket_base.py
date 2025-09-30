@@ -34,7 +34,6 @@ class EventCapturingProtocol(QuicConnectionProtocol):
             event = self._original_next_event()
             if event is not None and self._capture_enabled:
                 self._captured_events.append(event)
-                print(f"[CAPTURED] {type(event).__name__}")
             return event
         
         self._quic.next_event = capturing_next_event
@@ -113,39 +112,15 @@ class HTTP3SocketBase:
         """
         try:
             if not self.protocol or not self.connection:
-                print("[DEBUG] No protocol or connection")
                 return None
             
-            # Debug: Check connection state and internal queues
-            quic_state = getattr(self.protocol._quic, "_state", None)
-            print(f"[DEBUG] QUIC connection state: {quic_state}")
-            print(f"[DEBUG] Event loop: {asyncio.get_event_loop()}")
-            print(f"[DEBUG] Transport: {getattr(self.protocol, '_transport', 'None')}")
-            
-            # Check QUIC internal state
-            quic_conn = self.protocol._quic
-            print(f"[DEBUG] QUIC _events queue length: {len(getattr(quic_conn, '_events', []))}")
-            print(f"[DEBUG] QUIC _streams: {list(getattr(quic_conn, '_streams', {}).keys())}")
-            
-            # Check if stream 0 still exists
-            streams = getattr(quic_conn, '_streams', {})
-            if 0 in streams:
-                stream_0 = streams[0]
-                print(f"[DEBUG] Stream 0 exists! State: {getattr(stream_0, 'receiver', 'no receiver')}")
-            else:
-                print(f"[DEBUG] Stream 0 NOT in _streams (already discarded)")
-            
             responses_found = []
-            event_count = 0
             
             # Process all available QUIC events
             while True:
                 quic_event = self.protocol._quic.next_event()
                 if quic_event is None:
                     break
-                
-                event_count += 1
-                print(f"[DEBUG] Found QUIC event #{event_count}: {type(quic_event).__name__}")
                 
                 # Check for QUIC-level termination events
                 if isinstance(quic_event, ConnectionTerminated):
@@ -166,11 +141,8 @@ class HTTP3SocketBase:
                 
                 # Convert to H3 events and capture ALL responses
                 h3_events = self.connection.handle_event(quic_event)
-                print(f"[DEBUG] QUIC event generated {len(h3_events)} H3 events")
                 for h3_event in h3_events:
-                    print(f"[DEBUG] H3 event type: {type(h3_event).__name__}")
                     if isinstance(h3_event, HeadersReceived):
-                        print(f"[DEBUG] HeadersReceived on stream {getattr(h3_event, 'stream_id', '?')}")
                         # Capture ALL HeadersReceived events
                         headers_dict = {}
                         status_code = None
@@ -179,7 +151,6 @@ class HTTP3SocketBase:
                             name_str = name.decode() if isinstance(name, bytes) else str(name)
                             value_str = value.decode(errors='ignore') if isinstance(value, bytes) else str(value)
                             headers_dict[name_str] = value_str
-                            print(f"[DEBUG] Header: {name_str} = {value_str}")
                             
                             if name_str == ':status':
                                 status_code = value_str
@@ -213,17 +184,14 @@ class HTTP3SocketBase:
             
             # If we found responses but no status codes
             if responses_found:
-                print(f"[DEBUG] Returning {len(responses_found)} responses without status codes")
                 return (
                     EventNames.FRAMES_SENT.name,
                     f"Received {len(responses_found)} response(s) without status codes",
                     responses_found
                 )
             
-            print(f"[DEBUG] No responses found. Processed {event_count} QUIC events total.")
             return None
         except Exception as e:
-            print(f"[DEBUG] Exception in _check_for_any_response: {e}")
             return None
 
     async def _receive_frame(self, timeout=None) -> Optional[List[H3Event]]:
@@ -331,15 +299,10 @@ class HTTP3SocketBase:
                 # Enable event capture BEFORE transmitting
                 # This will intercept ALL calls to next_event(), even internal ones
                 if hasattr(self.protocol, 'enable_capture'):
-                    print("[DEBUG] Enabling event capture")
                     self.protocol.enable_capture()
-                else:
-                    print("[DEBUG] Protocol doesn't support event capture!")
                 
                 # Transmit the data
-                print("[DEBUG] Transmitting frame")
                 self.protocol.transmit()
-                print("[DEBUG] Transmit complete")
                 
                 # Wait for the response to arrive and be captured
                 # The EventCapturingProtocol will intercept ALL next_event() calls
@@ -351,7 +314,6 @@ class HTTP3SocketBase:
                         if hasattr(self.protocol, 'get_captured_events'):
                             captured = self.protocol.get_captured_events()
                             if captured:
-                                print(f"[DEBUG] Got {len(captured)} captured events!")
                                 result = self._process_captured_events(captured)
                                 if result:
                                     if hasattr(self.protocol, 'disable_capture'):
@@ -359,8 +321,6 @@ class HTTP3SocketBase:
                                     event_name, message, responses = result
                                     detailed_msg = f"{message}. Responses: {responses}"
                                     return event_name, sent_frames, detailed_msg
-                            else:
-                                print(f"[DEBUG] No captured events yet (check {i//10 + 1})")
                 
                 # Continue checking for slower responses
                 for check_attempt in range(20):  # 20 * 100ms = 2 seconds
@@ -369,7 +329,6 @@ class HTTP3SocketBase:
                     if hasattr(self.protocol, 'get_captured_events'):
                         captured = self.protocol.get_captured_events()
                         if captured:
-                            print(f"[DEBUG] Got {len(captured)} captured events (slower check)!")
                             result = self._process_captured_events(captured)
                             if result:
                                 if hasattr(self.protocol, 'disable_capture'):
@@ -377,11 +336,8 @@ class HTTP3SocketBase:
                                 event_name, message, responses = result
                                 detailed_msg = f"{message}. Responses: {responses}"
                                 return event_name, sent_frames, detailed_msg
-                        else:
-                            print(f"[DEBUG] No captured events in slow check {check_attempt + 1}")
                 
                 # Disable capture if no response found
-                print("[DEBUG] No response found, disabling capture")
                 if hasattr(self.protocol, 'disable_capture'):
                     self.protocol.disable_capture()
                         
@@ -395,8 +351,6 @@ class HTTP3SocketBase:
         responses_found = []
         
         for quic_event in quic_events:
-            print(f"[DEBUG] Processing captured event: {type(quic_event).__name__}")
-            
             # Check for QUIC-level termination
             if isinstance(quic_event, ConnectionTerminated):
                 return (
@@ -416,8 +370,6 @@ class HTTP3SocketBase:
             try:
                 h3_events = self.connection.handle_event(quic_event)
                 for h3_event in h3_events:
-                    print(f"[DEBUG] H3 event: {type(h3_event).__name__}")
-                    
                     if isinstance(h3_event, HeadersReceived):
                         status_code = None
                         for name, value in h3_event.headers:
@@ -435,7 +387,6 @@ class HTTP3SocketBase:
                         
                         # Check for ANY status code (we want to record all responses)
                         if status_code:
-                            print(f"[DEBUG] Found status code: {status_code}")
                             return (
                                 EventNames.REJECTED.name,
                                 f"Received HTTP status {status_code}",
@@ -449,7 +400,7 @@ class HTTP3SocketBase:
                             "data_length": len(h3_event.data) if h3_event.data else 0
                         })
             except Exception as e:
-                print(f"[DEBUG] Error processing H3 event: {e}")
+                pass
         
         if responses_found:
             return (
