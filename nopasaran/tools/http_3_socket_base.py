@@ -22,6 +22,46 @@ class HTTP3SocketBase:
         self.protocol: Optional[QuicConnectionProtocol] = None
         self.MAX_RETRY_ATTEMPTS = 3
         self.TIMEOUT = 5.0
+        
+        # Manage a persistent asyncio loop in the background for cross-call operations
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread = None
+
+    def _ensure_loop(self):
+        """Ensure a dedicated event loop is running in a background thread."""
+        if self._loop and self._loop.is_running():
+            return
+
+        def _run_loop(loop: asyncio.AbstractEventLoop):
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        self._loop = asyncio.new_event_loop()
+        import threading
+        self._loop_thread = threading.Thread(target=_run_loop, args=(self._loop,), daemon=True)
+        self._loop_thread.start()
+
+    def run_sync(self, coro):
+        """Run a coroutine on the persistent loop and wait for the result."""
+        self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
+
+    # Synchronous wrappers for primitives
+    def start_sync(self):
+        return self.run_sync(self.start())
+
+    def send_deterministic_frames_sync(self, frame_type: str = "client_frames"):
+        return self.run_sync(self.send_deterministic_frames(frame_type))
+
+    def close_sync(self):
+        try:
+            result = self.run_sync(self.close())
+        finally:
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop = None
+        return result
 
     async def _receive_frame(self, timeout=None) -> Optional[List[H3Event]]:
         """Helper method to receive H3 events with timeout"""
@@ -125,7 +165,6 @@ class HTTP3SocketBase:
                     end_stream = frame.get("end_stream", True)
                     
                     self.connection.send_headers(stream_id, headers, end_stream=end_stream)
-                    logger.debug(f"Sent HEADERS on stream {stream_id}: {headers}")
                     sent_frames.append(frame)
                 
                 # Transmit the data
@@ -168,7 +207,7 @@ class HTTP3SocketBase:
             except Exception as e:
                 return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
         
-        return EventNames.FRAMES_SENT.name, sent_frames, f"Successfully sent {len(sent_frames)} frames."
+        return EventNames.FRAMES_SENT.name, sent_frames, f"Successfully sent {len(sent_frames)} frames on stream {stream_id}."
 
     def _convert_headers(self, headers_dict: Dict[str, str]) -> List[Tuple[bytes, bytes]]:
         """Convert headers dict to list of byte tuples"""

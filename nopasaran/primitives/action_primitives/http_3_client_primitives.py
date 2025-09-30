@@ -69,7 +69,8 @@ class HTTP3ClientPrimitives:
             - EventNames.CLIENT_STARTED
         """
         client = state_machine.get_variable_value(inputs[0])
-        event, msg = asyncio.run(client.start())
+        # Use persistent loop so the connection remains active across steps
+        event, msg = client.start_sync()
         state_machine.set_variable_value(outputs[0], event)
         state_machine.set_variable_value(outputs[1], msg)
 
@@ -114,7 +115,7 @@ class HTTP3ClientPrimitives:
         # Set up frame specification for deterministic frame sending
         frame_spec = {"client_frames": client_frames}
         client.set_deterministic_frames(frame_spec)
-        event, frames_sent, msg = asyncio.run(client.send_deterministic_frames("client_frames"))
+        event, frames_sent, msg = client.send_deterministic_frames_sync("client_frames")
         state_machine.set_variable_value(outputs[0], event)
         state_machine.set_variable_value(outputs[1], frames_sent)
         state_machine.set_variable_value(outputs[2], msg)
@@ -132,6 +133,6 @@ class HTTP3ClientPrimitives:
             - The event name
         """
         client = state_machine.get_variable_value(inputs[0])
-        event = asyncio.run(client.close())
+        event = client.close_sync()
         state_machine.set_variable_value(outputs[0], event)
         state_machine.trigger_event(event)
