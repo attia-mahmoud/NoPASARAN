@@ -114,8 +114,8 @@ class HTTP3SocketBase:
                                             )
                                             return
                 
-                # Small sleep to avoid busy loop
-                await asyncio.sleep(0.001)
+                # Yield to event loop to allow network I/O
+                await asyncio.sleep(0)
         except Exception as e:
             pass
     
@@ -248,9 +248,11 @@ class HTTP3SocketBase:
                     self.protocol.transmit()
                     
                     # Give time for response to arrive and be processed by background listener
-                    # Check multiple times over a 2 second window
-                    for _ in range(200):  # 200 * 0.01s = 2 seconds
-                        await asyncio.sleep(0.01)
+                    # Poll very aggressively for first 100ms (when 400 should arrive based on wireshark)
+                    # Then continue polling for up to 2 seconds total
+                    for i in range(400):  # 400 * 0.005s = 2 seconds
+                        # Shorter sleep intervals to catch fast responses
+                        await asyncio.sleep(0.005)
                         if self._error_detected:
                             event_name, message = self._error_detected
                             return event_name, sent_frames, message
