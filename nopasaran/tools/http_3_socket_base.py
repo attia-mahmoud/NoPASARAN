@@ -21,27 +21,29 @@ class HTTP3SocketBase:
         self.MAX_RETRY_ATTEMPTS = 3
         self.TIMEOUT = 5.0
         
-        # Manage a persistent asyncio loop in the background for cross-call operations
+        # Persistent event loop for the connection lifecycle
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread = None
-        
 
     def _ensure_loop(self):
-        """Ensure a dedicated event loop is running in a background thread."""
+        """Ensure we have a dedicated event loop running in a background thread."""
         if self._loop and self._loop.is_running():
             return
-
+        
         def _run_loop(loop: asyncio.AbstractEventLoop):
             asyncio.set_event_loop(loop)
             loop.run_forever()
-
+        
         self._loop = asyncio.new_event_loop()
         import threading
         self._loop_thread = threading.Thread(target=_run_loop, args=(self._loop,), daemon=True)
         self._loop_thread.start()
+        
+        # Give the thread a moment to start
+        time.sleep(0.01)
 
     def run_sync(self, coro):
-        """Run a coroutine on the persistent loop and wait for the result."""
+        """Run a coroutine on the persistent event loop."""
         self._ensure_loop()
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
@@ -54,12 +56,11 @@ class HTTP3SocketBase:
         return self.run_sync(self.send_deterministic_frames(frame_type))
 
     def close_sync(self):
-        try:
-            result = self.run_sync(self.close())
-        finally:
-            if self._loop and self._loop.is_running():
-                self._loop.call_soon_threadsafe(self._loop.stop)
-            self._loop = None
+        result = self.run_sync(self.close())
+        # Stop the background loop
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        self._loop = None
         return result
 
     async def _check_for_any_response(self, timeout=2.0) -> Optional[Tuple[str, str, List]]:
@@ -71,6 +72,12 @@ class HTTP3SocketBase:
             if not self.protocol or not self.connection:
                 print("[DEBUG] No protocol or connection")
                 return None
+            
+            # Debug: Check connection state
+            quic_state = getattr(self.protocol._quic, "_state", None)
+            print(f"[DEBUG] QUIC connection state: {quic_state}")
+            print(f"[DEBUG] Event loop: {asyncio.get_event_loop()}")
+            print(f"[DEBUG] Transport: {getattr(self.protocol, '_transport', 'None')}")
             
             responses_found = []
             event_count = 0
