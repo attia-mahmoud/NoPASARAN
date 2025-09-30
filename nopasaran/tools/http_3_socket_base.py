@@ -18,35 +18,36 @@ class EventCapturingProtocol(QuicConnectionProtocol):
         super().__init__(*args, **kwargs)
         self._captured_events: List[QuicEvent] = []
         self._capture_enabled = False
-    
-    def datagram_received(self, data: bytes, addr: tuple) -> None:
-        """Override to capture events as datagrams arrive"""
-        # Call parent to process the datagram
-        super().datagram_received(data, addr)
-        
-        # If capturing is enabled, immediately drain events and store them
-        if self._capture_enabled:
-            while True:
-                event = self._quic.next_event()
-                if event is None:
-                    break
-                self._captured_events.append(event)
-                print(f"[CAPTURED] {type(event).__name__} at {time.time()}")
-    
-    def get_captured_events(self) -> List[QuicEvent]:
-        """Return and clear captured events"""
-        events = self._captured_events.copy()
-        self._captured_events.clear()
-        return events
+        self._original_next_event = None
     
     def enable_capture(self):
-        """Enable event capturing"""
+        """Enable event capturing by monkey-patching next_event"""
         self._capture_enabled = True
         self._captured_events.clear()
+        
+        # Save original next_event if not already saved
+        if self._original_next_event is None:
+            self._original_next_event = self._quic.next_event
+        
+        # Replace next_event with our capturing version
+        def capturing_next_event():
+            event = self._original_next_event()
+            if event is not None and self._capture_enabled:
+                self._captured_events.append(event)
+                print(f"[CAPTURED] {type(event).__name__}")
+            return event
+        
+        self._quic.next_event = capturing_next_event
     
     def disable_capture(self):
-        """Disable event capturing"""
+        """Disable event capturing and restore original next_event"""
         self._capture_enabled = False
+        if self._original_next_event is not None:
+            self._quic.next_event = self._original_next_event
+    
+    def get_captured_events(self) -> List[QuicEvent]:
+        """Return captured events (don't clear - let disable_capture handle that)"""
+        return self._captured_events.copy()
 
 class HTTP3SocketBase:
     """Base class for HTTP/3 socket operations"""
@@ -327,30 +328,39 @@ class HTTP3SocketBase:
                     self.connection.send_headers(stream_id, headers, end_stream=end_stream)
                     sent_frames.append(frame)
                 
-                # Enable event capture before transmitting
+                # Enable event capture BEFORE transmitting
+                # This will intercept ALL calls to next_event(), even internal ones
                 if hasattr(self.protocol, 'enable_capture'):
+                    print("[DEBUG] Enabling event capture")
                     self.protocol.enable_capture()
+                else:
+                    print("[DEBUG] Protocol doesn't support event capture!")
                 
                 # Transmit the data
+                print("[DEBUG] Transmitting frame")
                 self.protocol.transmit()
+                print("[DEBUG] Transmit complete")
                 
                 # Wait for the response to arrive and be captured
-                # The EventCapturingProtocol will intercept events as datagrams arrive
+                # The EventCapturingProtocol will intercept ALL next_event() calls
                 for i in range(50):  # 50 * 1ms = 50ms initial rapid check
                     await asyncio.sleep(0.001)
                     
                     # Check captured events every 10ms
-                    if i % 10 == 9 and hasattr(self.protocol, 'get_captured_events'):
-                        captured = self.protocol.get_captured_events()
-                        if captured:
-                            print(f"[DEBUG] Got {len(captured)} captured events!")
-                            result = self._process_captured_events(captured)
-                            if result:
-                                if hasattr(self.protocol, 'disable_capture'):
-                                    self.protocol.disable_capture()
-                                event_name, message, responses = result
-                                detailed_msg = f"{message}. Responses: {responses}"
-                                return event_name, sent_frames, detailed_msg
+                    if i % 10 == 9:
+                        if hasattr(self.protocol, 'get_captured_events'):
+                            captured = self.protocol.get_captured_events()
+                            if captured:
+                                print(f"[DEBUG] Got {len(captured)} captured events!")
+                                result = self._process_captured_events(captured)
+                                if result:
+                                    if hasattr(self.protocol, 'disable_capture'):
+                                        self.protocol.disable_capture()
+                                    event_name, message, responses = result
+                                    detailed_msg = f"{message}. Responses: {responses}"
+                                    return event_name, sent_frames, detailed_msg
+                            else:
+                                print(f"[DEBUG] No captured events yet (check {i//10 + 1})")
                 
                 # Continue checking for slower responses
                 for check_attempt in range(20):  # 20 * 100ms = 2 seconds
@@ -367,8 +377,11 @@ class HTTP3SocketBase:
                                 event_name, message, responses = result
                                 detailed_msg = f"{message}. Responses: {responses}"
                                 return event_name, sent_frames, detailed_msg
+                        else:
+                            print(f"[DEBUG] No captured events in slow check {check_attempt + 1}")
                 
                 # Disable capture if no response found
+                print("[DEBUG] No response found, disabling capture")
                 if hasattr(self.protocol, 'disable_capture'):
                     self.protocol.disable_capture()
                         
