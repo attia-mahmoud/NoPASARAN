@@ -69,15 +69,20 @@ class HTTP3SocketBase:
         """
         try:
             if not self.protocol or not self.connection:
+                print("[DEBUG] No protocol or connection")
                 return None
             
             responses_found = []
+            event_count = 0
             
             # Process all available QUIC events
             while True:
                 quic_event = self.protocol._quic.next_event()
                 if quic_event is None:
                     break
+                
+                event_count += 1
+                print(f"[DEBUG] Found QUIC event #{event_count}: {type(quic_event).__name__}")
                 
                 # Check for QUIC-level termination events
                 if isinstance(quic_event, ConnectionTerminated):
@@ -98,8 +103,11 @@ class HTTP3SocketBase:
                 
                 # Convert to H3 events and capture ALL responses
                 h3_events = self.connection.handle_event(quic_event)
+                print(f"[DEBUG] QUIC event generated {len(h3_events)} H3 events")
                 for h3_event in h3_events:
+                    print(f"[DEBUG] H3 event type: {type(h3_event).__name__}")
                     if isinstance(h3_event, HeadersReceived):
+                        print(f"[DEBUG] HeadersReceived on stream {getattr(h3_event, 'stream_id', '?')}")
                         # Capture ALL HeadersReceived events
                         headers_dict = {}
                         status_code = None
@@ -108,6 +116,7 @@ class HTTP3SocketBase:
                             name_str = name.decode() if isinstance(name, bytes) else str(name)
                             value_str = value.decode(errors='ignore') if isinstance(value, bytes) else str(value)
                             headers_dict[name_str] = value_str
+                            print(f"[DEBUG] Header: {name_str} = {value_str}")
                             
                             if name_str == ':status':
                                 status_code = value_str
@@ -141,14 +150,17 @@ class HTTP3SocketBase:
             
             # If we found responses but no status codes
             if responses_found:
+                print(f"[DEBUG] Returning {len(responses_found)} responses without status codes")
                 return (
                     EventNames.FRAMES_SENT.name,
                     f"Received {len(responses_found)} response(s) without status codes",
                     responses_found
                 )
             
+            print(f"[DEBUG] No responses found. Processed {event_count} QUIC events total.")
             return None
         except Exception as e:
+            print(f"[DEBUG] Exception in _check_for_any_response: {e}")
             return None
 
     async def _receive_frame(self, timeout=None) -> Optional[List[H3Event]]:
@@ -256,16 +268,18 @@ class HTTP3SocketBase:
                 # Transmit the data
                 self.protocol.transmit()
                 
-                # Wait for response to arrive (2 seconds to catch any responses)
-                await asyncio.sleep(2.0)
-                
-                # Now check if any responses were received
-                response_result = await self._check_for_any_response()
-                if response_result:
-                    event_name, message, responses = response_result
-                    # Include response details in the message
-                    detailed_msg = f"{message}. Responses: {responses}"
-                    return event_name, sent_frames, detailed_msg
+                # Poll for responses over a 2 second period
+                # Check frequently to catch fast responses
+                for check_attempt in range(20):  # Check 20 times over 2 seconds
+                    await asyncio.sleep(0.1)  # 100ms between checks
+                    
+                    # Check if any responses were received
+                    response_result = await self._check_for_any_response()
+                    if response_result:
+                        event_name, message, responses = response_result
+                        # Include response details in the message
+                        detailed_msg = f"{message}. Responses: {responses}"
+                        return event_name, sent_frames, detailed_msg
                         
             except Exception as e:
                 return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
