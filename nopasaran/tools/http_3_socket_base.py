@@ -24,6 +24,11 @@ class HTTP3SocketBase:
         # Manage a persistent asyncio loop in the background for cross-call operations
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread = None
+        
+        # Background event listener
+        self._listener_task: Optional[asyncio.Task] = None
+        self._error_detected: Optional[Tuple[str, str]] = None  # (event_name, message)
+        self._listener_running = False
 
     def _ensure_loop(self):
         """Ensure a dedicated event loop is running in a background thread."""
@@ -61,54 +66,41 @@ class HTTP3SocketBase:
             self._loop = None
         return result
 
-    async def _check_for_error_response(self, stream_id: Optional[int] = None, timeout=2.0) -> Optional[Tuple[str, str]]:
+    async def _background_event_listener(self):
         """
-        Check for error responses after sending a frame.
-        Returns (event_name, message) tuple if an error is detected, None otherwise.
-        Checks for: 4xx/5xx status codes, connection termination, stream resets.
+        Continuously listen for incoming QUIC/H3 events in the background.
+        Detects error responses (4xx/5xx), connection termination, and stream resets.
         """
         try:
-            start_time = time.time()
-            # Yield to event loop to allow IO to progress
-            await asyncio.sleep(0)
-            
-            events_checked = 0
-            while time.time() - start_time < timeout:
+            while self._listener_running:
                 if self.protocol and self.connection:
-                    # Process QUIC events
-                    had_events = False
+                    # Process all available QUIC events
                     while True:
                         quic_event = self.protocol._quic.next_event()
                         if quic_event is None:
                             break
                         
-                        had_events = True
-                        events_checked += 1
-                        
                         # Check for QUIC-level termination events
                         if isinstance(quic_event, ConnectionTerminated):
                             error_code = getattr(quic_event, 'error_code', 'unknown')
-                            return (
+                            self._error_detected = (
                                 EventNames.GOAWAY_RECEIVED.name,
                                 f"Connection terminated by peer with error code {error_code}"
                             )
+                            return
                         elif isinstance(quic_event, StreamReset):
                             error_code = getattr(quic_event, 'error_code', 'unknown')
                             stream_id = quic_event.stream_id
-                            return (
+                            self._error_detected = (
                                 EventNames.RESET_RECEIVED.name,
                                 f"Stream {stream_id} reset by peer with error code {error_code}"
                             )
+                            return
                         
                         # Convert to H3 events and check for error status codes
                         h3_events = self.connection.handle_event(quic_event)
                         for h3_event in h3_events:
                             if isinstance(h3_event, HeadersReceived):
-                                # Prefer same-stream, but don't require it
-                                if stream_id is not None and getattr(h3_event, 'stream_id', None) is not None:
-                                    if h3_event.stream_id != stream_id:
-                                        # Not preferred stream; still allow detection below
-                                        pass
                                 # Check for error status codes (4xx and 5xx)
                                 for name, value in h3_event.headers:
                                     name_b = name if isinstance(name, (bytes, bytearray)) else str(name).encode()
@@ -116,18 +108,30 @@ class HTTP3SocketBase:
                                     if name_b == b':status':
                                         status_code_str = value_b.decode(errors='ignore')
                                         if value_b[:1] in (b'4', b'5'):
-                                            return (
+                                            self._error_detected = (
                                                 EventNames.REJECTED.name,
                                                 f"Received {status_code_str} status code"
                                             )
+                                            return
                 
-                # Short sleep to yield to event loop for receiving datagrams
-                await asyncio.sleep(0.01)
-            
-            # No error detected within timeout
-            return None
+                # Small sleep to avoid busy loop
+                await asyncio.sleep(0.001)
         except Exception as e:
-            return None
+            pass
+    
+    def _start_listener(self):
+        """Start the background event listener"""
+        if not self._listener_running and self.protocol and self.connection:
+            self._listener_running = True
+            self._error_detected = None
+            self._listener_task = asyncio.create_task(self._background_event_listener())
+    
+    def _stop_listener(self):
+        """Stop the background event listener"""
+        self._listener_running = False
+        if self._listener_task:
+            self._listener_task.cancel()
+            self._listener_task = None
 
     async def _receive_frame(self, timeout=None) -> Optional[List[H3Event]]:
         """Helper method to receive H3 events with timeout"""
@@ -212,39 +216,52 @@ class HTTP3SocketBase:
         except Exception:
             # If we cannot determine state, proceed cautiously
             pass
+        
+        # Start background listener to continuously monitor for error responses
+        self._start_listener()
+        
+        try:
+            sent_frames = []
             
-        sent_frames = []
-        
-        for frame in frames:
-            try:
-                # Get next available stream for the request
-                stream_id = self.protocol._quic.get_next_available_stream_id()
-                
-                if frame.get("type") == "HEADERS":
-                    headers_dict = frame.get("headers", {})
-                    # Normalize scheme for HTTP/3 (always HTTPS over QUIC)
-                    if ":scheme" in headers_dict and headers_dict.get(":scheme") == "http":
-                        headers_dict[":scheme"] = "https"
-                    headers = self._convert_headers(headers_dict)
-                    end_stream = frame.get("end_stream", True)
+            for frame in frames:
+                try:
+                    # Check if error was detected by background listener
+                    if self._error_detected:
+                        event_name, message = self._error_detected
+                        return event_name, sent_frames, message
                     
-                    self.connection.send_headers(stream_id, headers, end_stream=end_stream)
-                    sent_frames.append(frame)
-                
-                # Transmit the data
-                self.protocol.transmit()
-                
-                # Wait for and check responses
-                # We need to check both H3 events (status codes) and QUIC events (termination/reset)
-                response_check = await self._check_for_error_response(stream_id=stream_id, timeout=2.0)
-                if response_check:
-                    event_name, message = response_check
-                    return event_name, sent_frames, message
+                    # Get next available stream for the request
+                    stream_id = self.protocol._quic.get_next_available_stream_id()
+                    
+                    if frame.get("type") == "HEADERS":
+                        headers_dict = frame.get("headers", {})
+                        # Normalize scheme for HTTP/3 (always HTTPS over QUIC)
+                        if ":scheme" in headers_dict and headers_dict.get(":scheme") == "http":
+                            headers_dict[":scheme"] = "https"
+                        headers = self._convert_headers(headers_dict)
+                        end_stream = frame.get("end_stream", True)
                         
-            except Exception as e:
-                return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
-        
-        return EventNames.FRAMES_SENT.name, sent_frames, f"Successfully sent {len(sent_frames)} frames on stream {stream_id}."
+                        self.connection.send_headers(stream_id, headers, end_stream=end_stream)
+                        sent_frames.append(frame)
+                    
+                    # Transmit the data
+                    self.protocol.transmit()
+                    
+                    # Give time for response to arrive and be processed by background listener
+                    # Check multiple times over a 2 second window
+                    for _ in range(200):  # 200 * 0.01s = 2 seconds
+                        await asyncio.sleep(0.01)
+                        if self._error_detected:
+                            event_name, message = self._error_detected
+                            return event_name, sent_frames, message
+                            
+                except Exception as e:
+                    return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
+            
+            return EventNames.FRAMES_SENT.name, sent_frames, f"Successfully sent {len(sent_frames)} frames on stream {stream_id}."
+        finally:
+            # Always stop the listener when done
+            self._stop_listener()
 
     def _convert_headers(self, headers_dict: Dict[str, str]) -> List[Tuple[bytes, bytes]]:
         """Convert headers dict to list of byte tuples"""
@@ -333,6 +350,9 @@ class HTTP3SocketBase:
     async def close(self):
         """Close the HTTP/3 connection and clean up resources"""
         try:
+            # Stop background listener
+            self._stop_listener()
+            
             if self.connection and self.protocol:
                 # Close the QUIC connection gracefully
                 self.protocol._quic.close()
