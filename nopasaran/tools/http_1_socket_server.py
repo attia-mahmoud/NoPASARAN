@@ -15,7 +15,7 @@ class HTTP1SocketServer:
         self.received_request_data = None
         self.sock = None
         self.client_socket = None
-        self.TIMEOUT = 10.0
+        self.TIMEOUT = 5.0
 
     def handle_client_connection(self, client_socket, timeout):
         """

@@ -174,18 +174,21 @@ class HTTP3SocketBase:
                 await asyncio.sleep(0.1)
                 
                 # Check for immediate responses (like connection termination)
-                events = await self._receive_frame(timeout=0.3)
+                # Use a longer timeout to ensure we catch error responses
+                events = await self._receive_frame(timeout=2.0)
                 if events:
                     for event in events:
                         if isinstance(event, HeadersReceived):
                             # Check for error status codes (4xx and 5xx)
                             for name, value in event.headers:
-                                if name == b':status' and (value.startswith(b'4') or value.startswith(b'5')):
-                                    return (
-                                        EventNames.REJECTED.name,
-                                        sent_frames,
-                                        f"Received {value.decode()} status code after sending {len(sent_frames)}/{len(frames)} frames."
-                                    )
+                                if name == b':status':
+                                    status_code = value.decode()
+                                    if value.startswith(b'4') or value.startswith(b'5'):
+                                        return (
+                                            EventNames.REJECTED.name,
+                                            sent_frames,
+                                            f"Received {status_code} status code after sending {len(sent_frames)}/{len(frames)} frames."
+                                        )
                 
                 # Also check for QUIC-level events (GOAWAY/RESET)
                 quic_events = await self._receive_quic_events(timeout=0.1)
