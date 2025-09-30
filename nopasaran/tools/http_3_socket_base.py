@@ -275,7 +275,7 @@ class HTTP3SocketBase:
                 stream_id = self.protocol._quic.get_next_available_stream_id()
                 
                 if frame.get("type") == "HEADERS":
-                    headers_dict = frame.get("headers", {})
+                    headers_dict = frame.get("headers", {}).copy()
                     # Normalize scheme for HTTP/3 (always HTTPS over QUIC)
                     if ":scheme" in headers_dict and headers_dict.get(":scheme") == "http":
                         headers_dict[":scheme"] = "https"
@@ -283,7 +283,16 @@ class HTTP3SocketBase:
                     end_stream = frame.get("end_stream", True)
                     
                     self.connection.send_headers(stream_id, headers, end_stream=end_stream)
-                    sent_frames.append(frame)
+                    
+                    # Capture the actual sent frame with normalized headers and stream info
+                    actual_sent_frame = {
+                        "type": "HEADERS",
+                        "stream_id": stream_id,
+                        "headers": headers_dict,  # Normalized headers
+                        "headers_bytes": headers,  # Actual byte tuples sent
+                        "end_stream": end_stream
+                    }
+                    sent_frames.append(actual_sent_frame)
                 
                 # Enable event capture BEFORE transmitting
                 # This will intercept ALL calls to next_event(), even internal ones
