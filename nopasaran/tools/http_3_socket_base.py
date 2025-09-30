@@ -10,8 +10,6 @@ from aioquic.quic.connection import QuicConnectionState
 from nopasaran.definitions.events import EventNames
 import nopasaran.tools.http_3_overwrite
 
-logger = logging.getLogger("http3_base")
-
 class HTTP3SocketBase:
     """Base class for HTTP/3 socket operations"""
     
@@ -63,6 +61,67 @@ class HTTP3SocketBase:
             self._loop = None
         return result
 
+    async def _check_for_error_response(self, timeout=2.0) -> Optional[Tuple[str, str]]:
+        """
+        Check for error responses after sending a frame.
+        Returns (event_name, message) tuple if an error is detected, None otherwise.
+        Checks for: 4xx/5xx status codes, connection termination, stream resets.
+        """
+        try:
+            start_time = time.time()
+            # Give a brief initial pause for response to arrive
+            await asyncio.sleep(0.05)
+            
+            events_checked = 0
+            while time.time() - start_time < timeout:
+                if self.protocol and self.connection:
+                    # Process QUIC events
+                    had_events = False
+                    while True:
+                        quic_event = self.protocol._quic.next_event()
+                        if quic_event is None:
+                            break
+                        
+                        had_events = True
+                        events_checked += 1
+                        
+                        # Check for QUIC-level termination events
+                        if isinstance(quic_event, ConnectionTerminated):
+                            error_code = getattr(quic_event, 'error_code', 'unknown')
+                            return (
+                                EventNames.GOAWAY_RECEIVED.name,
+                                f"Connection terminated by peer with error code {error_code}"
+                            )
+                        elif isinstance(quic_event, StreamReset):
+                            error_code = getattr(quic_event, 'error_code', 'unknown')
+                            stream_id = quic_event.stream_id
+                            return (
+                                EventNames.RESET_RECEIVED.name,
+                                f"Stream {stream_id} reset by peer with error code {error_code}"
+                            )
+                        
+                        # Convert to H3 events and check for error status codes
+                        h3_events = self.connection.handle_event(quic_event)
+                        for h3_event in h3_events:
+                            if isinstance(h3_event, HeadersReceived):
+                                # Check for error status codes (4xx and 5xx)
+                                for name, value in h3_event.headers:
+                                    if name == b':status':
+                                        status_code = value.decode()
+                                        if value.startswith(b'4') or value.startswith(b'5'):
+                                            return (
+                                                EventNames.REJECTED.name,
+                                                f"Received {status_code} status code"
+                                            )
+                
+                # Short sleep to yield to event loop for receiving datagrams
+                await asyncio.sleep(0.01)
+            
+            # No error detected within timeout
+            return None
+        except Exception as e:
+            return None
+
     async def _receive_frame(self, timeout=None) -> Optional[List[H3Event]]:
         """Helper method to receive H3 events with timeout"""
         if timeout is None:
@@ -85,7 +144,6 @@ class HTTP3SocketBase:
                 await asyncio.sleep(0.01)
             return None
         except Exception as e:
-            logger.error(f"Error receiving frame: {e}")
             return None
 
     async def _receive_quic_events(self, timeout=None) -> Optional[List[QuicEvent]]:
@@ -116,7 +174,6 @@ class HTTP3SocketBase:
             
             return quic_events if quic_events else None
         except Exception as e:
-            logger.error(f"Error receiving QUIC events: {e}")
             return None
 
     def set_deterministic_frames(self, frame_spec: Dict[str, Any]):
@@ -170,42 +227,12 @@ class HTTP3SocketBase:
                 # Transmit the data
                 self.protocol.transmit()
                 
-                # Brief pause to allow for responses
-                await asyncio.sleep(0.1)
-                
-                # Check for immediate responses (like connection termination)
-                # Use a longer timeout to ensure we catch error responses
-                events = await self._receive_frame(timeout=2.0)
-                if events:
-                    for event in events:
-                        if isinstance(event, HeadersReceived):
-                            # Check for error status codes (4xx and 5xx)
-                            for name, value in event.headers:
-                                if name == b':status':
-                                    status_code = value.decode()
-                                    if value.startswith(b'4') or value.startswith(b'5'):
-                                        return (
-                                            EventNames.REJECTED.name,
-                                            sent_frames,
-                                            f"Received {status_code} status code after sending {len(sent_frames)}/{len(frames)} frames."
-                                        )
-                
-                # Also check for QUIC-level events (GOAWAY/RESET)
-                quic_events = await self._receive_quic_events(timeout=0.1)
-                if quic_events:
-                    for quic_event in quic_events:
-                        if isinstance(quic_event, ConnectionTerminated):
-                            return (
-                                EventNames.GOAWAY_RECEIVED.name,
-                                sent_frames,
-                                f"Connection terminated by peer: Received GOAWAY/connection termination after sending {len(sent_frames)} of {len(frames)} frames. Error code {getattr(quic_event, 'error_code', 'unknown')}."
-                            )
-                        elif isinstance(quic_event, StreamReset):
-                            return (
-                                EventNames.RESET_RECEIVED.name,
-                                sent_frames,
-                                f"Stream {quic_event.stream_id} reset by peer: Received StreamReset after sending frame #{len(sent_frames)} of {len(frames)}: {frame.get('type')}. Error code {getattr(quic_event, 'error_code', 'unknown')}"
-                            )
+                # Wait for and check responses
+                # We need to check both H3 events (status codes) and QUIC events (termination/reset)
+                response_check = await self._check_for_error_response(timeout=2.0)
+                if response_check:
+                    event_name, message = response_check
+                    return event_name, sent_frames, message
                         
             except Exception as e:
                 return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
@@ -294,7 +321,6 @@ class HTTP3SocketBase:
     #         elif result is None:
     #             return None
     #     except Exception as e:
-    #         logger.error(f"Error handling test: {e}")
     #         return None
 
     async def close(self):
