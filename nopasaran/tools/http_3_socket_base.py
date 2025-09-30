@@ -155,45 +155,30 @@ class HTTP3SocketBase:
                             if name_str == ':status':
                                 status_code = value_str
                         
-                        # Ignore 502 Bad Gateway errors (expected when server doesn't respond)
-                        if status_code == '502':
-                            continue
-                        
-                        responses_found.append({
-                            'stream_id': getattr(h3_event, 'stream_id', 'unknown'),
-                            'headers': headers_dict,
-                            'status': status_code
-                        })
-                        
-                        # If we found a status code, determine the event type
+                        # Only detect 4xx and 5xx errors (excluding 502)
+                        # Ignore all other status codes (2xx, 3xx, 502, etc.)
                         if status_code:
+                            # Skip 502 Bad Gateway (expected when server doesn't respond)
+                            if status_code == '502':
+                                continue
+                            
+                            # Only report 4xx and 5xx errors
                             if status_code.startswith('4') or status_code.startswith('5'):
+                                responses_found.append({
+                                    'stream_id': getattr(h3_event, 'stream_id', 'unknown'),
+                                    'headers': headers_dict,
+                                    'status': status_code
+                                })
                                 return (
                                     EventNames.REJECTED.name,
                                     f"Received {status_code} status code",
                                     responses_found
                                 )
-                            elif status_code.startswith('2'):
-                                return (
-                                    EventNames.FRAMES_SENT.name,
-                                    f"Received {status_code} status code",
-                                    responses_found
-                                )
+                            # Ignore all other status codes (2xx, 3xx, etc.)
                             else:
-                                return (
-                                    EventNames.FRAMES_SENT.name,
-                                    f"Received {status_code} status code",
-                                    responses_found
-                                )
+                                continue
             
-            # If we found responses but no status codes
-            if responses_found:
-                return (
-                    EventNames.FRAMES_SENT.name,
-                    f"Received {len(responses_found)} response(s) without status codes",
-                    responses_found
-                )
-            
+            # If we get here, no 4xx/5xx errors were found - return None to continue waiting
             return None
         except Exception as e:
             return None
@@ -381,42 +366,36 @@ class HTTP3SocketBase:
                                 status_code = value.decode()
                                 break
                         
-                        # Ignore 502 Bad Gateway errors (expected when server doesn't respond)
-                        if status_code == '502':
-                            continue
-                        
-                        response_info = {
-                            "type": "HeadersReceived",
-                            "stream_id": h3_event.stream_id,
-                            "status": status_code,
-                            "headers": dict(h3_event.headers)
-                        }
-                        responses_found.append(response_info)
-                        
-                        # Check for ANY status code (we want to record all responses)
+                        # Only detect 4xx and 5xx errors (excluding 502)
+                        # Ignore all other status codes (2xx, 3xx, 502, etc.)
                         if status_code:
-                            return (
-                                EventNames.REJECTED.name,
-                                f"Received HTTP status {status_code}",
-                                responses_found
-                            )
+                            # Skip 502 Bad Gateway (expected when server doesn't respond)
+                            if status_code == '502':
+                                continue
+                            
+                            # Only report 4xx and 5xx errors
+                            if status_code.startswith('4') or status_code.startswith('5'):
+                                response_info = {
+                                    "type": "HeadersReceived",
+                                    "stream_id": h3_event.stream_id,
+                                    "status": status_code,
+                                    "headers": dict(h3_event.headers)
+                                }
+                                responses_found.append(response_info)
+                                return (
+                                    EventNames.REJECTED.name,
+                                    f"Received HTTP status {status_code}",
+                                    responses_found
+                                )
+                            # Ignore all other status codes (2xx, 3xx, etc.)
+                            else:
+                                continue
                     
-                    elif isinstance(h3_event, DataReceived):
-                        responses_found.append({
-                            "type": "DataReceived",
-                            "stream_id": h3_event.stream_id,
-                            "data_length": len(h3_event.data) if h3_event.data else 0
-                        })
+                    # Ignore DataReceived events - we only care about 4xx/5xx status codes
             except Exception as e:
                 pass
         
-        if responses_found:
-            return (
-                EventNames.REJECTED.name,
-                f"Received {len(responses_found)} response events",
-                responses_found
-            )
-        
+        # If we get here, no 4xx/5xx errors were found - return None to continue waiting
         return None
     
     def _convert_headers(self, headers_dict: Dict[str, str]) -> List[Tuple[bytes, bytes]]:
