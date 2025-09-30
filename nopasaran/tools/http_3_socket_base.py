@@ -178,13 +178,13 @@ class HTTP3SocketBase:
                 if events:
                     for event in events:
                         if isinstance(event, HeadersReceived):
-                            # Check for error status codes
+                            # Check for error status codes (4xx and 5xx)
                             for name, value in event.headers:
-                                if name == b':status' and value.startswith(b'5'):
+                                if name == b':status' and (value.startswith(b'4') or value.startswith(b'5')):
                                     return (
                                         EventNames.REJECTED.name,
                                         sent_frames,
-                                        f"Received 5xx status code {value.decode()} after sending {len(sent_frames)}/{len(frames)} frames."
+                                        f"Received {value.decode()} status code after sending {len(sent_frames)}/{len(frames)} frames."
                                     )
                 
                 # Also check for QUIC-level events (GOAWAY/RESET)
