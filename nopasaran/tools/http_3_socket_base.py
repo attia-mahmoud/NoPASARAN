@@ -275,8 +275,15 @@ class HTTP3SocketBase:
                 # Transmit the data
                 self.protocol.transmit()
                 
-                # Poll for responses over a 2 second period
-                # Check frequently to catch fast responses
+                # Check IMMEDIATELY for fast responses (like 400 errors that arrive in ~20ms)
+                # The response may arrive before we even yield control
+                response_result = await self._check_for_any_response()
+                if response_result:
+                    event_name, message, responses = response_result
+                    detailed_msg = f"{message}. Responses: {responses}"
+                    return event_name, sent_frames, detailed_msg
+                
+                # Poll for slower responses over a 2 second period
                 for check_attempt in range(20):  # Check 20 times over 2 seconds
                     await asyncio.sleep(0.1)  # 100ms between checks
                     
