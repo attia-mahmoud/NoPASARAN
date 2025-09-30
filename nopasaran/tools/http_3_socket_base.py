@@ -61,7 +61,7 @@ class HTTP3SocketBase:
             self._loop = None
         return result
 
-    async def _check_for_error_response(self, timeout=2.0) -> Optional[Tuple[str, str]]:
+    async def _check_for_error_response(self, stream_id: Optional[int] = None, timeout=2.0) -> Optional[Tuple[str, str]]:
         """
         Check for error responses after sending a frame.
         Returns (event_name, message) tuple if an error is detected, None otherwise.
@@ -69,8 +69,8 @@ class HTTP3SocketBase:
         """
         try:
             start_time = time.time()
-            # Give a brief initial pause for response to arrive
-            await asyncio.sleep(0.05)
+            # Yield to event loop to allow IO to progress
+            await asyncio.sleep(0)
             
             events_checked = 0
             while time.time() - start_time < timeout:
@@ -104,14 +104,21 @@ class HTTP3SocketBase:
                         h3_events = self.connection.handle_event(quic_event)
                         for h3_event in h3_events:
                             if isinstance(h3_event, HeadersReceived):
+                                # Prefer same-stream, but don't require it
+                                if stream_id is not None and getattr(h3_event, 'stream_id', None) is not None:
+                                    if h3_event.stream_id != stream_id:
+                                        # Not preferred stream; still allow detection below
+                                        pass
                                 # Check for error status codes (4xx and 5xx)
                                 for name, value in h3_event.headers:
-                                    if name == b':status':
-                                        status_code = value.decode()
-                                        if value.startswith(b'4') or value.startswith(b'5'):
+                                    name_b = name if isinstance(name, (bytes, bytearray)) else str(name).encode()
+                                    value_b = value if isinstance(value, (bytes, bytearray)) else str(value).encode()
+                                    if name_b == b':status':
+                                        status_code_str = value_b.decode(errors='ignore')
+                                        if value_b[:1] in (b'4', b'5'):
                                             return (
                                                 EventNames.REJECTED.name,
-                                                f"Received {status_code} status code"
+                                                f"Received {status_code_str} status code"
                                             )
                 
                 # Short sleep to yield to event loop for receiving datagrams
@@ -229,7 +236,7 @@ class HTTP3SocketBase:
                 
                 # Wait for and check responses
                 # We need to check both H3 events (status codes) and QUIC events (termination/reset)
-                response_check = await self._check_for_error_response(timeout=2.0)
+                response_check = await self._check_for_error_response(stream_id=stream_id, timeout=2.0)
                 if response_check:
                     event_name, message = response_check
                     return event_name, sent_frames, message
