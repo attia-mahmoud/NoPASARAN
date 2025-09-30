@@ -377,6 +377,10 @@ class HTTP3SocketBase:
                                 status_code = value.decode()
                                 break
                         
+                        # Ignore 502 Bad Gateway errors (expected when server doesn't respond)
+                        if status_code == '502':
+                            continue
+                        
                         response_info = {
                             "type": "HeadersReceived",
                             "stream_id": h3_event.stream_id,
