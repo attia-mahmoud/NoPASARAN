@@ -62,14 +62,16 @@ class HTTP3SocketBase:
             self._loop = None
         return result
 
-    async def _check_for_error_responses(self, timeout=2.0) -> Optional[Tuple[str, str]]:
+    async def _check_for_any_response(self, timeout=2.0) -> Optional[Tuple[str, str, List]]:
         """
-        Check for error responses by processing available QUIC events.
-        Returns (event_name, message) if error detected, None otherwise.
+        Check for ANY response by processing available QUIC events.
+        Returns (event_name, message, headers_list) if response detected, None otherwise.
         """
         try:
             if not self.protocol or not self.connection:
                 return None
+            
+            responses_found = []
             
             # Process all available QUIC events
             while True:
@@ -82,31 +84,68 @@ class HTTP3SocketBase:
                     error_code = getattr(quic_event, 'error_code', 'unknown')
                     return (
                         EventNames.GOAWAY_RECEIVED.name,
-                        f"Connection terminated by peer with error code {error_code}"
+                        f"Connection terminated by peer with error code {error_code}",
+                        []
                     )
                 elif isinstance(quic_event, StreamReset):
                     error_code = getattr(quic_event, 'error_code', 'unknown')
                     stream_id_val = quic_event.stream_id
                     return (
                         EventNames.RESET_RECEIVED.name,
-                        f"Stream {stream_id_val} reset by peer with error code {error_code}"
+                        f"Stream {stream_id_val} reset by peer with error code {error_code}",
+                        []
                     )
                 
-                # Convert to H3 events and check for error status codes
+                # Convert to H3 events and capture ALL responses
                 h3_events = self.connection.handle_event(quic_event)
                 for h3_event in h3_events:
                     if isinstance(h3_event, HeadersReceived):
-                        # Check for error status codes (4xx and 5xx)
+                        # Capture ALL HeadersReceived events
+                        headers_dict = {}
+                        status_code = None
+                        
                         for name, value in h3_event.headers:
-                            name_b = name if isinstance(name, (bytes, bytearray)) else str(name).encode()
-                            value_b = value if isinstance(value, (bytes, bytearray)) else str(value).encode()
-                            if name_b == b':status':
-                                status_code_str = value_b.decode(errors='ignore')
-                                if value_b[:1] in (b'4', b'5'):
-                                    return (
-                                        EventNames.REJECTED.name,
-                                        f"Received {status_code_str} status code"
-                                    )
+                            name_str = name.decode() if isinstance(name, bytes) else str(name)
+                            value_str = value.decode(errors='ignore') if isinstance(value, bytes) else str(value)
+                            headers_dict[name_str] = value_str
+                            
+                            if name_str == ':status':
+                                status_code = value_str
+                        
+                        responses_found.append({
+                            'stream_id': getattr(h3_event, 'stream_id', 'unknown'),
+                            'headers': headers_dict,
+                            'status': status_code
+                        })
+                        
+                        # If we found a status code, determine the event type
+                        if status_code:
+                            if status_code.startswith('4') or status_code.startswith('5'):
+                                return (
+                                    EventNames.REJECTED.name,
+                                    f"Received {status_code} status code",
+                                    responses_found
+                                )
+                            elif status_code.startswith('2'):
+                                return (
+                                    EventNames.FRAMES_SENT.name,
+                                    f"Received {status_code} status code",
+                                    responses_found
+                                )
+                            else:
+                                return (
+                                    EventNames.FRAMES_SENT.name,
+                                    f"Received {status_code} status code",
+                                    responses_found
+                                )
+            
+            # If we found responses but no status codes
+            if responses_found:
+                return (
+                    EventNames.FRAMES_SENT.name,
+                    f"Received {len(responses_found)} response(s) without status codes",
+                    responses_found
+                )
             
             return None
         except Exception as e:
@@ -217,14 +256,16 @@ class HTTP3SocketBase:
                 # Transmit the data
                 self.protocol.transmit()
                 
-                # Wait for response to arrive (2 seconds to catch error responses)
+                # Wait for response to arrive (2 seconds to catch any responses)
                 await asyncio.sleep(2.0)
                 
-                # Now check if any error responses were received
-                error_result = await self._check_for_error_responses()
-                if error_result:
-                    event_name, message = error_result
-                    return event_name, sent_frames, message
+                # Now check if any responses were received
+                response_result = await self._check_for_any_response()
+                if response_result:
+                    event_name, message, responses = response_result
+                    # Include response details in the message
+                    detailed_msg = f"{message}. Responses: {responses}"
+                    return event_name, sent_frames, detailed_msg
                         
             except Exception as e:
                 return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
