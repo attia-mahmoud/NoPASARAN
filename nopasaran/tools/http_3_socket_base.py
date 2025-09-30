@@ -10,6 +10,44 @@ from aioquic.quic.connection import QuicConnectionState
 from nopasaran.definitions.events import EventNames
 import nopasaran.tools.http_3_overwrite
 
+
+class EventCapturingProtocol(QuicConnectionProtocol):
+    """Custom protocol that intercepts QUIC events before they're consumed"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._captured_events: List[QuicEvent] = []
+        self._capture_enabled = False
+    
+    def datagram_received(self, data: bytes, addr: tuple) -> None:
+        """Override to capture events as datagrams arrive"""
+        # Call parent to process the datagram
+        super().datagram_received(data, addr)
+        
+        # If capturing is enabled, immediately drain events and store them
+        if self._capture_enabled:
+            while True:
+                event = self._quic.next_event()
+                if event is None:
+                    break
+                self._captured_events.append(event)
+                print(f"[CAPTURED] {type(event).__name__} at {time.time()}")
+    
+    def get_captured_events(self) -> List[QuicEvent]:
+        """Return and clear captured events"""
+        events = self._captured_events.copy()
+        self._captured_events.clear()
+        return events
+    
+    def enable_capture(self):
+        """Enable event capturing"""
+        self._capture_enabled = True
+        self._captured_events.clear()
+    
+    def disable_capture(self):
+        """Disable event capturing"""
+        self._capture_enabled = False
+
 class HTTP3SocketBase:
     """Base class for HTTP/3 socket operations"""
     
@@ -289,47 +327,126 @@ class HTTP3SocketBase:
                     self.connection.send_headers(stream_id, headers, end_stream=end_stream)
                     sent_frames.append(frame)
                 
+                # Enable event capture before transmitting
+                if hasattr(self.protocol, 'enable_capture'):
+                    self.protocol.enable_capture()
+                
                 # Transmit the data
                 self.protocol.transmit()
                 
-                # CRITICAL: Give the event loop multiple chances to poll the socket
-                # and read incoming datagrams BEFORE checking for events
-                # The 400 response arrives in ~20ms but the event loop needs time to:
-                # 1. Poll the socket selector
-                # 2. Read the UDP datagram  
-                # 3. Process it through QuicConnection.receive_datagram()
-                # 4. Generate QuicEvents and add them to the queue
-                
-                # Yield control multiple times with short delays to let I/O happen
-                # Check for responses after every few yields
-                for i in range(50):  # 50 * 0.001 = 50ms total
-                    await asyncio.sleep(0.001)  # 1ms delay to trigger I/O polling
+                # Wait for the response to arrive and be captured
+                # The EventCapturingProtocol will intercept events as datagrams arrive
+                for i in range(50):  # 50 * 1ms = 50ms initial rapid check
+                    await asyncio.sleep(0.001)
                     
-                    # Check every 10ms
-                    if i % 10 == 9:
-                        response_result = await self._check_for_any_response()
-                        if response_result:
-                            event_name, message, responses = response_result
-                            detailed_msg = f"{message}. Responses: {responses}"
-                            return event_name, sent_frames, detailed_msg
+                    # Check captured events every 10ms
+                    if i % 10 == 9 and hasattr(self.protocol, 'get_captured_events'):
+                        captured = self.protocol.get_captured_events()
+                        if captured:
+                            print(f"[DEBUG] Got {len(captured)} captured events!")
+                            result = self._process_captured_events(captured)
+                            if result:
+                                if hasattr(self.protocol, 'disable_capture'):
+                                    self.protocol.disable_capture()
+                                event_name, message, responses = result
+                                detailed_msg = f"{message}. Responses: {responses}"
+                                return event_name, sent_frames, detailed_msg
                 
-                # Continue polling for slower responses
-                for check_attempt in range(20):  # Check 20 times over 2 seconds
-                    await asyncio.sleep(0.1)  # 100ms between checks
+                # Continue checking for slower responses
+                for check_attempt in range(20):  # 20 * 100ms = 2 seconds
+                    await asyncio.sleep(0.1)
                     
-                    # Check if any responses were received
-                    response_result = await self._check_for_any_response()
-                    if response_result:
-                        event_name, message, responses = response_result
-                        # Include response details in the message
-                        detailed_msg = f"{message}. Responses: {responses}"
-                        return event_name, sent_frames, detailed_msg
+                    if hasattr(self.protocol, 'get_captured_events'):
+                        captured = self.protocol.get_captured_events()
+                        if captured:
+                            print(f"[DEBUG] Got {len(captured)} captured events (slower check)!")
+                            result = self._process_captured_events(captured)
+                            if result:
+                                if hasattr(self.protocol, 'disable_capture'):
+                                    self.protocol.disable_capture()
+                                event_name, message, responses = result
+                                detailed_msg = f"{message}. Responses: {responses}"
+                                return event_name, sent_frames, detailed_msg
+                
+                # Disable capture if no response found
+                if hasattr(self.protocol, 'disable_capture'):
+                    self.protocol.disable_capture()
                         
             except Exception as e:
                 return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
         
         return EventNames.FRAMES_SENT.name, sent_frames, f"Successfully sent {len(sent_frames)} frames on stream {stream_id}."
 
+    def _process_captured_events(self, quic_events: List[QuicEvent]) -> Optional[Tuple[str, str, List[Dict]]]:
+        """Process captured QUIC events and check for responses"""
+        responses_found = []
+        
+        for quic_event in quic_events:
+            print(f"[DEBUG] Processing captured event: {type(quic_event).__name__}")
+            
+            # Check for QUIC-level termination
+            if isinstance(quic_event, ConnectionTerminated):
+                return (
+                    EventNames.REJECTED.name,
+                    f"Connection terminated with error code {quic_event.error_code}",
+                    [{"type": "ConnectionTerminated", "error_code": quic_event.error_code}]
+                )
+            
+            if isinstance(quic_event, StreamReset):
+                return (
+                    EventNames.REJECTED.name,
+                    f"Stream {quic_event.stream_id} reset with error code {quic_event.error_code}",
+                    [{"type": "StreamReset", "stream_id": quic_event.stream_id, "error_code": quic_event.error_code}]
+                )
+            
+            # Process through H3Connection to get H3 events
+            try:
+                h3_events = self.connection.handle_event(quic_event)
+                for h3_event in h3_events:
+                    print(f"[DEBUG] H3 event: {type(h3_event).__name__}")
+                    
+                    if isinstance(h3_event, HeadersReceived):
+                        status_code = None
+                        for name, value in h3_event.headers:
+                            if name == b':status':
+                                status_code = value.decode()
+                                break
+                        
+                        response_info = {
+                            "type": "HeadersReceived",
+                            "stream_id": h3_event.stream_id,
+                            "status": status_code,
+                            "headers": dict(h3_event.headers)
+                        }
+                        responses_found.append(response_info)
+                        
+                        # Check for ANY status code (we want to record all responses)
+                        if status_code:
+                            print(f"[DEBUG] Found status code: {status_code}")
+                            return (
+                                EventNames.REJECTED.name,
+                                f"Received HTTP status {status_code}",
+                                responses_found
+                            )
+                    
+                    elif isinstance(h3_event, DataReceived):
+                        responses_found.append({
+                            "type": "DataReceived",
+                            "stream_id": h3_event.stream_id,
+                            "data_length": len(h3_event.data) if h3_event.data else 0
+                        })
+            except Exception as e:
+                print(f"[DEBUG] Error processing H3 event: {e}")
+        
+        if responses_found:
+            return (
+                EventNames.REJECTED.name,
+                f"Received {len(responses_found)} response events",
+                responses_found
+            )
+        
+        return None
+    
     def _convert_headers(self, headers_dict: Dict[str, str]) -> List[Tuple[bytes, bytes]]:
         """Convert headers dict to list of byte tuples"""
         return [(key.encode() if isinstance(key, str) else key, 

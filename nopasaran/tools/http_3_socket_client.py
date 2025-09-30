@@ -8,7 +8,7 @@ from aioquic.h3.events import H3Event, HeadersReceived, DataReceived
 from aioquic.quic.events import QuicEvent
 from nopasaran.definitions.events import EventNames
 from nopasaran.http_3_utils import create_quic_configuration
-from nopasaran.tools.http_3_socket_base import HTTP3SocketBase
+from nopasaran.tools.http_3_socket_base import HTTP3SocketBase, EventCapturingProtocol
 import nopasaran.tools.http_3_overwrite
 
 logger = logging.getLogger("http3_client")
@@ -30,7 +30,7 @@ class HTTP3SocketClient(HTTP3SocketBase):
                 self.host,
                 self.port,
                 configuration=configuration,
-                create_protocol=QuicConnectionProtocol,
+                create_protocol=EventCapturingProtocol,
             )
             
             self.protocol = await self._protocol_context.__aenter__()
