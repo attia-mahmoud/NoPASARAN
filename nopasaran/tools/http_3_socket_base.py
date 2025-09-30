@@ -25,10 +25,6 @@ class HTTP3SocketBase:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread = None
         
-        # Background event listener
-        self._listener_task: Optional[asyncio.Task] = None
-        self._error_detected: Optional[Tuple[str, str]] = None  # (event_name, message)
-        self._listener_running = False
 
     def _ensure_loop(self):
         """Ensure a dedicated event loop is running in a background thread."""
@@ -66,72 +62,55 @@ class HTTP3SocketBase:
             self._loop = None
         return result
 
-    async def _background_event_listener(self):
+    async def _check_for_error_responses(self, timeout=2.0) -> Optional[Tuple[str, str]]:
         """
-        Continuously listen for incoming QUIC/H3 events in the background.
-        Detects error responses (4xx/5xx), connection termination, and stream resets.
+        Check for error responses by processing available QUIC events.
+        Returns (event_name, message) if error detected, None otherwise.
         """
         try:
-            while self._listener_running:
-                if self.protocol and self.connection:
-                    # Process all available QUIC events
-                    while True:
-                        quic_event = self.protocol._quic.next_event()
-                        if quic_event is None:
-                            break
-                        
-                        # Check for QUIC-level termination events
-                        if isinstance(quic_event, ConnectionTerminated):
-                            error_code = getattr(quic_event, 'error_code', 'unknown')
-                            self._error_detected = (
-                                EventNames.GOAWAY_RECEIVED.name,
-                                f"Connection terminated by peer with error code {error_code}"
-                            )
-                            return
-                        elif isinstance(quic_event, StreamReset):
-                            error_code = getattr(quic_event, 'error_code', 'unknown')
-                            stream_id = quic_event.stream_id
-                            self._error_detected = (
-                                EventNames.RESET_RECEIVED.name,
-                                f"Stream {stream_id} reset by peer with error code {error_code}"
-                            )
-                            return
-                        
-                        # Convert to H3 events and check for error status codes
-                        h3_events = self.connection.handle_event(quic_event)
-                        for h3_event in h3_events:
-                            if isinstance(h3_event, HeadersReceived):
-                                # Check for error status codes (4xx and 5xx)
-                                for name, value in h3_event.headers:
-                                    name_b = name if isinstance(name, (bytes, bytearray)) else str(name).encode()
-                                    value_b = value if isinstance(value, (bytes, bytearray)) else str(value).encode()
-                                    if name_b == b':status':
-                                        status_code_str = value_b.decode(errors='ignore')
-                                        if value_b[:1] in (b'4', b'5'):
-                                            self._error_detected = (
-                                                EventNames.REJECTED.name,
-                                                f"Received {status_code_str} status code"
-                                            )
-                                            return
+            if not self.protocol or not self.connection:
+                return None
+            
+            # Process all available QUIC events
+            while True:
+                quic_event = self.protocol._quic.next_event()
+                if quic_event is None:
+                    break
                 
-                # Yield to event loop to allow network I/O
-                await asyncio.sleep(0)
+                # Check for QUIC-level termination events
+                if isinstance(quic_event, ConnectionTerminated):
+                    error_code = getattr(quic_event, 'error_code', 'unknown')
+                    return (
+                        EventNames.GOAWAY_RECEIVED.name,
+                        f"Connection terminated by peer with error code {error_code}"
+                    )
+                elif isinstance(quic_event, StreamReset):
+                    error_code = getattr(quic_event, 'error_code', 'unknown')
+                    stream_id_val = quic_event.stream_id
+                    return (
+                        EventNames.RESET_RECEIVED.name,
+                        f"Stream {stream_id_val} reset by peer with error code {error_code}"
+                    )
+                
+                # Convert to H3 events and check for error status codes
+                h3_events = self.connection.handle_event(quic_event)
+                for h3_event in h3_events:
+                    if isinstance(h3_event, HeadersReceived):
+                        # Check for error status codes (4xx and 5xx)
+                        for name, value in h3_event.headers:
+                            name_b = name if isinstance(name, (bytes, bytearray)) else str(name).encode()
+                            value_b = value if isinstance(value, (bytes, bytearray)) else str(value).encode()
+                            if name_b == b':status':
+                                status_code_str = value_b.decode(errors='ignore')
+                                if value_b[:1] in (b'4', b'5'):
+                                    return (
+                                        EventNames.REJECTED.name,
+                                        f"Received {status_code_str} status code"
+                                    )
+            
+            return None
         except Exception as e:
-            pass
-    
-    def _start_listener(self):
-        """Start the background event listener"""
-        if not self._listener_running and self.protocol and self.connection:
-            self._listener_running = True
-            self._error_detected = None
-            self._listener_task = asyncio.create_task(self._background_event_listener())
-    
-    def _stop_listener(self):
-        """Stop the background event listener"""
-        self._listener_running = False
-        if self._listener_task:
-            self._listener_task.cancel()
-            self._listener_task = None
+            return None
 
     async def _receive_frame(self, timeout=None) -> Optional[List[H3Event]]:
         """Helper method to receive H3 events with timeout"""
@@ -217,53 +196,40 @@ class HTTP3SocketBase:
             # If we cannot determine state, proceed cautiously
             pass
         
-        # Start background listener to continuously monitor for error responses
-        self._start_listener()
+        sent_frames = []
         
-        try:
-            sent_frames = []
-            
-            for frame in frames:
-                try:
-                    # Check if error was detected by background listener
-                    if self._error_detected:
-                        event_name, message = self._error_detected
-                        return event_name, sent_frames, message
+        for frame in frames:
+            try:
+                # Get next available stream for the request
+                stream_id = self.protocol._quic.get_next_available_stream_id()
+                
+                if frame.get("type") == "HEADERS":
+                    headers_dict = frame.get("headers", {})
+                    # Normalize scheme for HTTP/3 (always HTTPS over QUIC)
+                    if ":scheme" in headers_dict and headers_dict.get(":scheme") == "http":
+                        headers_dict[":scheme"] = "https"
+                    headers = self._convert_headers(headers_dict)
+                    end_stream = frame.get("end_stream", True)
                     
-                    # Get next available stream for the request
-                    stream_id = self.protocol._quic.get_next_available_stream_id()
-                    
-                    if frame.get("type") == "HEADERS":
-                        headers_dict = frame.get("headers", {})
-                        # Normalize scheme for HTTP/3 (always HTTPS over QUIC)
-                        if ":scheme" in headers_dict and headers_dict.get(":scheme") == "http":
-                            headers_dict[":scheme"] = "https"
-                        headers = self._convert_headers(headers_dict)
-                        end_stream = frame.get("end_stream", True)
+                    self.connection.send_headers(stream_id, headers, end_stream=end_stream)
+                    sent_frames.append(frame)
+                
+                # Transmit the data
+                self.protocol.transmit()
+                
+                # Wait for response to arrive (2 seconds to catch error responses)
+                await asyncio.sleep(2.0)
+                
+                # Now check if any error responses were received
+                error_result = await self._check_for_error_responses()
+                if error_result:
+                    event_name, message = error_result
+                    return event_name, sent_frames, message
                         
-                        self.connection.send_headers(stream_id, headers, end_stream=end_stream)
-                        sent_frames.append(frame)
-                    
-                    # Transmit the data
-                    self.protocol.transmit()
-                    
-                    # Give time for response to arrive and be processed by background listener
-                    # Poll very aggressively for first 100ms (when 400 should arrive based on wireshark)
-                    # Then continue polling for up to 2 seconds total
-                    for i in range(400):  # 400 * 0.005s = 2 seconds
-                        # Shorter sleep intervals to catch fast responses
-                        await asyncio.sleep(0.005)
-                        if self._error_detected:
-                            event_name, message = self._error_detected
-                            return event_name, sent_frames, message
-                            
-                except Exception as e:
-                    return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
-            
-            return EventNames.FRAMES_SENT.name, sent_frames, f"Successfully sent {len(sent_frames)} frames on stream {stream_id}."
-        finally:
-            # Always stop the listener when done
-            self._stop_listener()
+            except Exception as e:
+                return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
+        
+        return EventNames.FRAMES_SENT.name, sent_frames, f"Successfully sent {len(sent_frames)} frames on stream {stream_id}."
 
     def _convert_headers(self, headers_dict: Dict[str, str]) -> List[Tuple[bytes, bytes]]:
         """Convert headers dict to list of byte tuples"""
@@ -352,9 +318,6 @@ class HTTP3SocketBase:
     async def close(self):
         """Close the HTTP/3 connection and clean up resources"""
         try:
-            # Stop background listener
-            self._stop_listener()
-            
             if self.connection and self.protocol:
                 # Close the QUIC connection gracefully
                 self.protocol._quic.close()
