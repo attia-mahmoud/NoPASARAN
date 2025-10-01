@@ -354,14 +354,14 @@ class HTTP3SocketBase:
             # Check for QUIC-level termination
             if isinstance(quic_event, ConnectionTerminated):
                 return (
-                    EventNames.REJECTED.name,
+                    EventNames.GOAWAY_RECEIVED.name,
                     f"Connection terminated with error code {quic_event.error_code}",
                     [{"type": "ConnectionTerminated", "error_code": quic_event.error_code}]
                 )
             
             if isinstance(quic_event, StreamReset):
                 return (
-                    EventNames.REJECTED.name,
+                    EventNames.RESET_RECEIVED.name,
                     f"Stream {quic_event.stream_id} reset with error code {quic_event.error_code}",
                     [{"type": "StreamReset", "stream_id": quic_event.stream_id, "error_code": quic_event.error_code}]
                 )
