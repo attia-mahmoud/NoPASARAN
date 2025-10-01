@@ -296,6 +296,27 @@ class HTTP3SocketBase:
                     }
                     sent_frames.append(actual_sent_frame)
                 
+                elif frame.get("type") == "DATA":
+                    # Get data payload
+                    data = frame.get("data", b"")
+                    # Convert string to bytes if needed
+                    if isinstance(data, str):
+                        data = data.encode('utf-8')
+                    end_stream = frame.get("end_stream", True)
+                    
+                    # Send DATA frame
+                    self.connection.send_data(stream_id, data, end_stream=end_stream)
+                    
+                    # Capture the actual sent frame
+                    actual_sent_frame = {
+                        "type": "DATA",
+                        "stream_id": stream_id,
+                        "data": data,
+                        "data_length": len(data),
+                        "end_stream": end_stream
+                    }
+                    sent_frames.append(actual_sent_frame)
+                
                 # Enable event capture BEFORE transmitting
                 # This will intercept ALL calls to next_event(), even internal ones
                 if hasattr(self.protocol, 'enable_capture'):
