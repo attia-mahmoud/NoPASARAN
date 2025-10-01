@@ -317,6 +317,31 @@ class HTTP3SocketBase:
                     }
                     sent_frames.append(actual_sent_frame)
                 
+                elif frame.get("type") == "TRAILERS":
+                    # Trailers are HEADERS sent after DATA (must be on same stream)
+                    headers_dict = frame.get("headers", {}).copy()
+                    
+                    # Trailers must NOT contain pseudo-headers (:method, :path, etc.)
+                    # But we'll allow them for protocol violation testing
+                    headers = self._convert_headers(headers_dict)
+                    
+                    # Trailers MUST have end_stream=True (per RFC 9114)
+                    # But allow override for protocol violation testing
+                    end_stream = frame.get("end_stream", True)
+                    
+                    # Send as HEADERS frame (trailers are just HEADERS after DATA)
+                    self.connection.send_headers(stream_id, headers, end_stream=end_stream)
+                    
+                    # Capture the actual sent frame
+                    actual_sent_frame = {
+                        "type": "TRAILERS",
+                        "stream_id": stream_id,
+                        "headers": headers_dict,
+                        "headers_bytes": headers,
+                        "end_stream": end_stream
+                    }
+                    sent_frames.append(actual_sent_frame)
+                
                 # Enable event capture BEFORE transmitting
                 # This will intercept ALL calls to next_event(), even internal ones
                 if hasattr(self.protocol, 'enable_capture'):
