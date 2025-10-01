@@ -271,9 +271,11 @@ class HTTP3SocketBase:
         
         for frame in frames:
             try:
-                # Get next available stream for the request
-                stream_id = self.protocol._quic.get_next_available_stream_id()
-                
+                if "stream_id" in frame:
+                    stream_id = frame["stream_id"]
+                else:
+                    stream_id = self.protocol._quic.get_next_available_stream_id()
+                                
                 if frame.get("type") == "HEADERS":
                     headers_dict = frame.get("headers", {}).copy()
                     # Normalize scheme for HTTP/3 (always HTTPS over QUIC)
@@ -342,7 +344,7 @@ class HTTP3SocketBase:
             except Exception as e:
                 return EventNames.ERROR.name, sent_frames, f"Error sending frame: {str(e)}"
         
-        return EventNames.FRAMES_SENT.name, sent_frames, f"Successfully sent {len(sent_frames)} frames on stream {stream_id}."
+        return EventNames.FRAMES_SENT.name, sent_frames, f"Successfully sent {len(sent_frames)} frames."
 
     def _process_captured_events(self, quic_events: List[QuicEvent]) -> Optional[Tuple[str, str, List[Dict]]]:
         """Process captured QUIC events and check for responses"""
