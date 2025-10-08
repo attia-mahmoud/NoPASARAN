@@ -47,15 +47,35 @@ class HTTP3SocketClient(HTTP3SocketBase):
             if not self.protocol or not self.protocol._quic:
                 return EventNames.ERROR.name, f"Failed to establish QUIC connection to {self.host}:{self.port}"
                 
-            # Wait a bit more for handshake completion
+            # Wait for handshake completion with faster failure detection
             max_wait = 5.0
             wait_time = 0.0
+            last_crypto_count = 0
+            retransmit_cycles = 0
+            packets_received = 0
+            
             while wait_time < max_wait and not self.protocol._quic._handshake_complete:
                 await asyncio.sleep(0.1)
                 wait_time += 0.1
                 
+                # Track if we're receiving ANY packets back
+                if hasattr(self.protocol._quic, '_packets_received'):
+                    packets_received = self.protocol._quic._packets_received
+                
+                # Detect retransmission loop (proxy not responding)
+                if hasattr(self.protocol._quic, '_crypto_retransmitted_data'):
+                    current_crypto_count = len(self.protocol._quic._crypto_retransmitted_data)
+                    if current_crypto_count > last_crypto_count:
+                        retransmit_cycles += 1
+                        last_crypto_count = current_crypto_count
+                        
+                        # If we've retransmitted 3+ times, proxy likely doesn't support HTTP/3
+                        if retransmit_cycles >= 3:
+                            diagnostic = f"packets_received={packets_received}" if packets_received > 0 else "no packets received"
+                            return EventNames.ERROR.name, f"Proxy at {self.host}:{self.port} not responding to QUIC handshake ({diagnostic}). Proxy likely doesn't support HTTP/3 or UDP is blocked."
+                
             if not self.protocol._quic._handshake_complete:
-                return EventNames.ERROR.name, f"QUIC handshake did not complete within {max_wait}s"
+                return EventNames.ERROR.name, f"QUIC handshake did not complete within {max_wait}s - proxy may not support HTTP/3"
             
             selected_protocol = 'h3'  # HTTP/3 always uses h3
             return EventNames.CLIENT_STARTED.name, f"Client successfully connected to {self.host}:{self.port} with TLS and ALPN protocol {selected_protocol}."
