@@ -159,7 +159,7 @@ class HTTP3SocketBase:
                         # Ignore all other status codes (2xx, 3xx, 502, etc.)
                         if status_code:
                             # Skip 502 Bad Gateway (expected when server doesn't respond)
-                            if status_code == '502':
+                            if status_code == '502' or status_code == '503':
                                 continue
                             
                             # Only report 4xx and 5xx errors
@@ -427,7 +427,7 @@ class HTTP3SocketBase:
                         # Ignore all other status codes (2xx, 3xx, 502, etc.)
                         if status_code:
                             # Skip 502 Bad Gateway (expected when server doesn't respond)
-                            if status_code == '502':
+                            if status_code == '502' or status_code == '503':
                                 continue
                             
                             # Only report 4xx and 5xx errors
