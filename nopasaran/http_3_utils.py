@@ -48,8 +48,7 @@ def create_quic_configuration(is_client=True, verify_mode=None, secrets_log_file
         is_client=is_client,
         alpn_protocols=["h3"],
         verify_mode=verify_mode,
-        max_idle_timeout=5.0,  # Close connection after 5s of inactivity
-        idle_timeout=5.0,       # Redundant but explicit
+        idle_timeout=5.0
     )
     
     # Enable SSL key logging only for clients
