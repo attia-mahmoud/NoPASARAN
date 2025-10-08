@@ -26,13 +26,12 @@ class HTTP3SocketClient(HTTP3SocketBase):
                 verify_mode=ssl.CERT_NONE
             )
             
-            # Connect to server with explicit SNI for proxy compatibility
+            # Connect to server
             self._protocol_context = connect(
                 self.host,
                 self.port,
                 configuration=configuration,
                 create_protocol=EventCapturingProtocol,
-                server_name=self.host,  # Explicit SNI for proxy compatibility
             )
             
             self.protocol = await self._protocol_context.__aenter__()
