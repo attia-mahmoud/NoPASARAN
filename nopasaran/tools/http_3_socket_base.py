@@ -116,6 +116,34 @@ class HTTP3SocketBase:
             
             responses_found = []
             
+            # First, check connection state for DRAINING (indicates GOAWAY received)
+            if hasattr(self.protocol, '_quic'):
+                current_state = getattr(self.protocol._quic, "_state", None)
+                if current_state == QuicConnectionState.DRAINING:
+                    # Connection is draining - peer sent CONNECTION_CLOSE
+                    close_event = getattr(self.protocol._quic, "_close_event", None)
+                    if close_event:
+                        frame_info = {
+                            "type": "CONNECTION_CLOSE",
+                            "error_code": getattr(close_event, "error_code", "unknown"),
+                            "frame_type": getattr(close_event, "frame_type", None),
+                            "reason_phrase": getattr(close_event, "reason_phrase", ""),
+                        }
+                        error_code_val = frame_info["error_code"]
+                        error_code_hex = hex(error_code_val) if isinstance(error_code_val, int) else error_code_val
+                        reason = frame_info["reason_phrase"]
+                        return (
+                            EventNames.GOAWAY_RECEIVED.name,
+                            f"Connection close received (error code {error_code_hex}, reason: {reason})",
+                            [frame_info]
+                        )
+                    else:
+                        return (
+                            EventNames.GOAWAY_RECEIVED.name,
+                            f"Connection close received (state DRAINING, no close event details)",
+                            [{"type": "CONNECTION_CLOSE", "state": "DRAINING"}]
+                        )
+            
             # Process all available QUIC events
             while True:
                 quic_event = self.protocol._quic.next_event()
@@ -124,11 +152,19 @@ class HTTP3SocketBase:
                 
                 # Check for QUIC-level termination events
                 if isinstance(quic_event, ConnectionTerminated):
-                    error_code = getattr(quic_event, 'error_code', 'unknown')
+                    frame_info = {
+                        "type": "CONNECTION_CLOSE",
+                        "error_code": getattr(quic_event, 'error_code', 'unknown'),
+                        "frame_type": getattr(quic_event, "frame_type", None),
+                        "reason_phrase": getattr(quic_event, "reason_phrase", ""),
+                    }
+                    error_code_val = frame_info["error_code"]
+                    error_code_hex = hex(error_code_val) if isinstance(error_code_val, int) else error_code_val
+                    reason = frame_info["reason_phrase"]
                     return (
                         EventNames.GOAWAY_RECEIVED.name,
-                        f"Connection terminated by peer with error code {error_code}",
-                        []
+                        f"Connection terminated by peer (error code {error_code_hex}, reason: {reason})",
+                        [frame_info]
                     )
                 elif isinstance(quic_event, StreamReset):
                     error_code = getattr(quic_event, 'error_code', 'unknown')
@@ -396,13 +432,49 @@ class HTTP3SocketBase:
         """Process captured QUIC events and check for responses"""
         responses_found = []
         
+        # Also check connection state for DRAINING (indicates GOAWAY received)
+        if self.protocol and hasattr(self.protocol, '_quic'):
+            current_state = getattr(self.protocol._quic, "_state", None)
+            if current_state == QuicConnectionState.DRAINING:
+                # Connection is draining - peer sent CONNECTION_CLOSE
+                close_event = getattr(self.protocol._quic, "_close_event", None)
+                if close_event:
+                    frame_info = {
+                        "type": "CONNECTION_CLOSE",
+                        "error_code": getattr(close_event, "error_code", "unknown"),
+                        "frame_type": getattr(close_event, "frame_type", None),
+                        "reason_phrase": getattr(close_event, "reason_phrase", ""),
+                    }
+                    error_code_val = frame_info["error_code"]
+                    error_code_hex = hex(error_code_val) if isinstance(error_code_val, int) else error_code_val
+                    reason = frame_info["reason_phrase"]
+                    return (
+                        EventNames.GOAWAY_RECEIVED.name,
+                        f"Connection close received (error code {error_code_hex}, reason: {reason})",
+                        [frame_info]
+                    )
+                else:
+                    return (
+                        EventNames.GOAWAY_RECEIVED.name,
+                        f"Connection close received (state DRAINING, no close event details)",
+                        [{"type": "CONNECTION_CLOSE", "state": "DRAINING"}]
+                    )
+        
         for quic_event in quic_events:
             # Check for QUIC-level termination
             if isinstance(quic_event, ConnectionTerminated):
+                frame_info = {
+                    "type": "CONNECTION_CLOSE",
+                    "error_code": quic_event.error_code,
+                    "frame_type": getattr(quic_event, "frame_type", None),
+                    "reason_phrase": getattr(quic_event, "reason_phrase", ""),
+                }
+                error_code_hex = hex(quic_event.error_code) if isinstance(quic_event.error_code, int) else quic_event.error_code
+                reason = frame_info["reason_phrase"]
                 return (
                     EventNames.GOAWAY_RECEIVED.name,
-                    f"Connection terminated with error code {quic_event.error_code}",
-                    [{"type": "ConnectionTerminated", "error_code": quic_event.error_code}]
+                    f"Connection terminated (error code {error_code_hex}, reason: {reason})",
+                    [frame_info]
                 )
             
             if isinstance(quic_event, StreamReset):
