@@ -20,17 +20,19 @@ class HTTP3SocketClient(HTTP3SocketBase):
         """Start the HTTP/3 client"""
         try:
             # Create QUIC configuration (TLS always enabled for HTTP/3, SSL key logging always enabled for client)
+            import ssl
             configuration = create_quic_configuration(
                 is_client=True,
-                verify_mode=False
+                verify_mode=ssl.CERT_NONE
             )
             
-            # Connect to server
+            # Connect to server with explicit SNI for proxy compatibility
             self._protocol_context = connect(
                 self.host,
                 self.port,
                 configuration=configuration,
                 create_protocol=EventCapturingProtocol,
+                server_name=self.host,  # Explicit SNI for proxy compatibility
             )
             
             self.protocol = await self._protocol_context.__aenter__()
@@ -57,6 +59,28 @@ class HTTP3SocketClient(HTTP3SocketBase):
             while wait_time < max_wait and not self.protocol._quic._handshake_complete:
                 await asyncio.sleep(0.1)
                 wait_time += 0.1
+                
+                # Check if connection was closed by peer (TLS error, etc.)
+                if hasattr(self.protocol._quic, '_close_event') and self.protocol._quic._close_event:
+                    close_event = self.protocol._quic._close_event
+                    error_code = getattr(close_event, 'error_code', 'unknown')
+                    reason = getattr(close_event, 'reason_phrase', '')
+                    
+                    # Extract TLS alert if this is a CRYPTO_ERROR
+                    if isinstance(error_code, int) and 0x100 <= error_code <= 0x1FF:
+                        tls_alert = error_code & 0xFF
+                        tls_alert_names = {
+                            80: "internal_error",
+                            40: "handshake_failure",
+                            42: "bad_certificate",
+                            43: "unsupported_certificate",
+                            70: "protocol_version",
+                            71: "insufficient_security",
+                        }
+                        alert_name = tls_alert_names.get(tls_alert, f"alert_{tls_alert}")
+                        return EventNames.ERROR.name, f"Proxy rejected TLS handshake with {alert_name} (error {hex(error_code)}). Reason: {reason if reason else 'none given'}. Check proxy's TLS requirements."
+                    
+                    return EventNames.ERROR.name, f"Connection closed by proxy during handshake (error {hex(error_code) if isinstance(error_code, int) else error_code}, reason: {reason})"
                 
                 # Track if we're receiving ANY packets back
                 if hasattr(self.protocol._quic, '_packets_received'):

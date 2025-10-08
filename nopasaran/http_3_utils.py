@@ -48,7 +48,9 @@ def create_quic_configuration(is_client=True, verify_mode=None, secrets_log_file
         is_client=is_client,
         alpn_protocols=["h3"],
         verify_mode=verify_mode,
-        idle_timeout=5.0
+        idle_timeout=5.0,
+        # Make QUIC parameters more permissive for proxy compatibility
+        max_datagram_frame_size=65536
     )
     
     # Enable SSL key logging only for clients
