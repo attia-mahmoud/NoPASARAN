@@ -23,7 +23,7 @@ class HTTP3SocketClient(HTTP3SocketBase):
             import ssl
             configuration = create_quic_configuration(
                 is_client=True,
-                verify_mode=ssl.CERT_NONE
+                verify_mode=ssl.CERT_NONE  # Required for self-signed certificates (e.g., Caddy local_certs)
             )
             
             # Connect to server
@@ -53,37 +53,10 @@ class HTTP3SocketClient(HTTP3SocketBase):
             wait_time = 0.0
             last_crypto_count = 0
             retransmit_cycles = 0
-            packets_received = 0
             
             while wait_time < max_wait and not self.protocol._quic._handshake_complete:
                 await asyncio.sleep(0.1)
                 wait_time += 0.1
-                
-                # Check if connection was closed by peer (TLS error, etc.)
-                if hasattr(self.protocol._quic, '_close_event') and self.protocol._quic._close_event:
-                    close_event = self.protocol._quic._close_event
-                    error_code = getattr(close_event, 'error_code', 'unknown')
-                    reason = getattr(close_event, 'reason_phrase', '')
-                    
-                    # Extract TLS alert if this is a CRYPTO_ERROR
-                    if isinstance(error_code, int) and 0x100 <= error_code <= 0x1FF:
-                        tls_alert = error_code & 0xFF
-                        tls_alert_names = {
-                            80: "internal_error",
-                            40: "handshake_failure",
-                            42: "bad_certificate",
-                            43: "unsupported_certificate",
-                            70: "protocol_version",
-                            71: "insufficient_security",
-                        }
-                        alert_name = tls_alert_names.get(tls_alert, f"alert_{tls_alert}")
-                        return EventNames.ERROR.name, f"Proxy rejected TLS handshake with {alert_name} (error {hex(error_code)}). Reason: {reason if reason else 'none given'}. Check proxy's TLS requirements."
-                    
-                    return EventNames.ERROR.name, f"Connection closed by proxy during handshake (error {hex(error_code) if isinstance(error_code, int) else error_code}, reason: {reason})"
-                
-                # Track if we're receiving ANY packets back
-                if hasattr(self.protocol._quic, '_packets_received'):
-                    packets_received = self.protocol._quic._packets_received
                 
                 # Detect retransmission loop (proxy not responding)
                 if hasattr(self.protocol._quic, '_crypto_retransmitted_data'):
@@ -94,8 +67,7 @@ class HTTP3SocketClient(HTTP3SocketBase):
                         
                         # If we've retransmitted 3+ times, proxy likely doesn't support HTTP/3
                         if retransmit_cycles >= 3:
-                            diagnostic = f"packets_received={packets_received}" if packets_received > 0 else "no packets received"
-                            return EventNames.ERROR.name, f"Proxy at {self.host}:{self.port} not responding to QUIC handshake ({diagnostic}). Proxy likely doesn't support HTTP/3 or UDP is blocked."
+                            return EventNames.ERROR.name, f"Proxy at {self.host}:{self.port} not responding to QUIC handshake (likely doesn't support HTTP/3 or UDP is blocked)"
                 
             if not self.protocol._quic._handshake_complete:
                 return EventNames.ERROR.name, f"QUIC handshake did not complete within {max_wait}s - proxy may not support HTTP/3"
@@ -108,6 +80,31 @@ class HTTP3SocketClient(HTTP3SocketBase):
         except ConnectionRefusedError as e:
             return EventNames.ERROR.name, f"Connection refused by server at {self.host}:{self.port}. Server may not be running or port may be blocked: {e}"
         except Exception as e:
+            # Check if connection was closed with TLS error before generic fallback
+            if self.protocol and hasattr(self.protocol, '_quic') and hasattr(self.protocol._quic, '_close_event'):
+                close_event = self.protocol._quic._close_event
+                if close_event:
+                    error_code = getattr(close_event, 'error_code', None)
+                    reason = getattr(close_event, 'reason_phrase', '')
+                    
+                    # Extract TLS alert if this is a CRYPTO_ERROR (0x100-0x1FF range)
+                    if isinstance(error_code, int) and 0x100 <= error_code <= 0x1FF:
+                        tls_alert = error_code & 0xFF
+                        tls_alert_names = {
+                            80: "internal_error",
+                            40: "handshake_failure",
+                            42: "bad_certificate",
+                            43: "unsupported_certificate",
+                            70: "protocol_version",
+                            71: "insufficient_security",
+                        }
+                        alert_name = tls_alert_names.get(tls_alert, f"alert_{tls_alert}")
+                        return EventNames.ERROR.name, f"Proxy rejected TLS handshake with {alert_name} (error {hex(error_code)}). Reason: {reason if reason else 'none'}. Proxy may have incompatible TLS 1.3 configuration."
+                    
+                    if error_code is not None:
+                        return EventNames.ERROR.name, f"Connection closed by proxy (error {hex(error_code) if isinstance(error_code, int) else error_code}, reason: {reason if reason else 'none'})"
+            
+            # Generic error fallback
             return EventNames.ERROR.name, f"Error connecting to {self.host}:{self.port}: {str(e)}"
 
     async def run_communication(self, frame_spec: Dict[str, Any] = None):
