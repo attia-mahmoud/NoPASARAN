@@ -58,6 +58,29 @@ class HTTP3SocketClient(HTTP3SocketBase):
                 await asyncio.sleep(0.1)
                 wait_time += 0.1
                 
+                # Check if connection was closed by peer during handshake
+                if hasattr(self.protocol._quic, '_close_event') and self.protocol._quic._close_event:
+                    close_event = self.protocol._quic._close_event
+                    error_code = getattr(close_event, 'error_code', None)
+                    reason = getattr(close_event, 'reason_phrase', '')
+                    
+                    # Extract TLS alert if this is a CRYPTO_ERROR (0x100-0x1FF range)
+                    if isinstance(error_code, int) and 0x100 <= error_code <= 0x1FF:
+                        tls_alert = error_code & 0xFF
+                        tls_alert_names = {
+                            80: "internal_error",
+                            40: "handshake_failure",
+                            42: "bad_certificate",
+                            43: "unsupported_certificate",
+                            70: "protocol_version",
+                            71: "insufficient_security",
+                        }
+                        alert_name = tls_alert_names.get(tls_alert, f"alert_{tls_alert}")
+                        return EventNames.ERROR.name, f"Proxy rejected TLS handshake with {alert_name} (error {hex(error_code)}). Proxy may have incompatible TLS 1.3 configuration or doesn't support aioquic's cipher suites."
+                    
+                    if error_code is not None:
+                        return EventNames.ERROR.name, f"Connection closed by proxy during handshake (error {hex(error_code) if isinstance(error_code, int) else error_code}, reason: '{reason}')"
+                
                 # Detect retransmission loop (proxy not responding)
                 if hasattr(self.protocol._quic, '_crypto_retransmitted_data'):
                     current_crypto_count = len(self.protocol._quic._crypto_retransmitted_data)
